@@ -1,0 +1,116 @@
+# Objective
+
+I have an existing `SCENARIOS.json` containing **5,300 curated healthcare user scenarios** mapped to **53 training rules**. Each scenario represents a unique clinical intent and is associated with a rule, category, priority, style, and user query.
+
+My goal is to expand this dataset to approximately **200,000 high-quality, clinically realistic user scenarios** for fine-tuning a healthcare Small Language Model (SLM).
+
+The expansion **must preserve the original clinical intent** of every scenario. The objective is **not** to paraphrase randomly, but to systematically increase diversity while remaining faithful to the associated training rule.
+
+## Expansion Dimensions
+
+Every base scenario should be augmented using combinations of:
+
+### Persona
+
+Examples:
+
+* Newly diagnosed Type 2 diabetes
+* Long-term Type 2 diabetes
+* Type 1 diabetes
+* Prediabetes
+* Gestational diabetes
+* Elderly patient
+* Working professional
+* College student
+* Parent
+* Caregiver
+* Athlete
+* Shift worker
+
+### Emotion
+
+Examples:
+
+* Calm
+* Curious
+* Confused
+* Worried
+* Frustrated
+* Angry
+* Hopeful
+* Discouraged
+* Panicked
+* Motivated
+
+### Context
+
+Examples:
+
+* Before breakfast
+* After breakfast
+* Before lunch
+* After lunch
+* Before dinner
+* After dinner
+* Before exercise
+* After exercise
+* During travel
+* At work
+* Weekend
+* Holiday
+* Sick day
+
+### Time Context
+
+Examples:
+
+* Today
+* Yesterday
+* Last week
+* Last month
+* This morning
+* Tonight
+* Recently
+
+### Conversation Depth
+
+Examples:
+
+* Single turn
+* Follow-up
+* Clarification
+* Confirmation
+* Correction
+* Multi-turn conversation
+
+## Requirements
+
+1. Preserve the original rule_id.
+2. Preserve the original clinical intent.
+3. Never introduce unsafe or contradictory medical advice.
+4. Produce natural language that sounds like a real patient.
+5. Avoid duplicates.
+6. Maintain balanced distribution across all rules.
+7. Maintain balanced distribution across personas and emotions.
+8. Keep language varied while remaining clinically accurate.
+
+## Expected Output
+
+Do NOT generate all scenarios yet.
+
+Instead, design a complete scenario expansion strategy.
+
+Return:
+
+1. Recommended augmentation architecture.
+2. Number of variants per scenario.
+3. Distribution across personas.
+4. Distribution across emotions.
+5. Distribution across contexts.
+6. Distribution across conversation depth.
+7. Estimated final dataset size.
+8. Rules to prevent duplicate or low-quality scenarios.
+9. Recommended JSON schema for the expanded scenarios.
+10. A scalable strategy that can later generate approximately 200,000 scenarios while maintaining high quality.
+
+Think like an AI Dataset Architect rather than a chatbot.
