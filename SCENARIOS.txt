@@ -1,0 +1,56 @@
+personas:
+- Newly Diagnosed Type 2
+- Long-term Type 2
+- Type 1 Diabetes
+- Prediabetes
+- Gestational Diabetes
+- Elderly Patient
+- Working Professional
+- College Student
+- Shift Worker
+- Athlete
+- Parent
+- Caregiver
+emotions:
+- Calm
+- Curious
+- Confused
+- Worried
+- Frustrated
+- Angry
+- Hopeful
+- Discouraged
+- Panicked
+- Motivated
+contexts:
+- Before Breakfast
+- After Breakfast
+- Before Lunch
+- After Lunch
+- Before Dinner
+- After Dinner
+- Before Exercise
+- After Exercise
+- During Travel
+- At Work
+- Weekend
+- Holiday
+- Sick Day
+time:
+- Today
+- Yesterday
+- Last Week
+- Last Month
+- Morning
+- Afternoon
+- Evening
+- Night
+Conversation Depth:
+Single Turn
+Two Turn
+Three Turn
+Clarification
+Correction
+Follow-up
+Challenge
+Confirmation
