@@ -1,0 +1,186 @@
+I am building an organization-specific Clinical Small Language Model.
+Context:
+- The base model is MedGemma 27B.
+- I have created a synthetic instruction tuning dataset from our organization's clinical guidelines, safety policies, FAQ, learning content, and recipes.
+- The dataset is already generated using Llama 70B.
+- The dataset is in chat format (system, user, assistant).
+- Vector Search will continue to provide FAQ, recipe, and learning documents during inference.
+- The objective of fine tuning is NOT to memorize documents.
+- The objective is to teach MedGemma our organization's behavior, tone, safety rules, response style, and clinical boundaries.
+- Patient data is NOT part of this phase.
+For all future code generation, assume this architecture and generate production-ready Databricks code accordingly.
+
+Prompt 1 — Architecture
+I have prepared an instruction tuning dataset in chat format (system, user, assistant).
+I want to fine-tune MedGemma 27B using QLoRA on Databricks.
+Design a production-ready project architecture.
+Requirements:
+- Databricks compatible
+- Hugging Face Transformers
+- PEFT
+- TRL SFTTrainer
+- BitsAndBytes
+- Accelerate
+Show:
+- folder structure
+- files
+- responsibilities
+- execution flow
+Do not generate code yet.
+
+Prompt 2 — Environment Setup
+Generate a Databricks notebook that installs and verifies all dependencies required for MedGemma 27B QLoRA fine tuning.
+Include:
+- transformers
+- peft
+- trl
+- bitsandbytes
+- accelerate
+- datasets
+- evaluate
+- tensorboard
+Verify GPU availability.
+Verify CUDA.
+Verify BF16 support.
+Verify Flash Attention availability.
+Stop after environment validation.
+
+Prompt 3 — Dataset Loader
+Generate a production-ready dataset loader.
+Input:
+train.jsonl
+validation.jsonl
+Dataset format:
+messages:
+- role: system
+- role: user
+- role: assistant
+Requirements:
+- load dataset
+- validate schema
+- remove invalid records
+- tokenize
+- compute token statistics
+- return HuggingFace Dataset
+Do not load the model yet.
+
+Prompt 4 — Model Loader
+Generate a production-ready MedGemma 27B model loader.
+Requirements:
+- 4-bit quantization
+- BitsAndBytesConfig
+- BF16
+- PEFT
+- LoRA
+Use recommended QLoRA configuration.
+Print trainable parameter count.
+Do not start training.
+
+Prompt 5 — Training Configuration
+Generate a configuration module for MedGemma 27B instruction tuning.
+Include:
+learning rate
+batch size
+gradient accumulation
+epochs
+warmup
+scheduler
+evaluation strategy
+save strategy
+logging strategy
+max sequence length
+LoRA parameters
+Explain why each value was selected.
+
+Prompt 6 — Training Script
+Generate the complete training script using SFTTrainer.
+Requirements:
+load dataset
+load tokenizer
+load MedGemma
+apply LoRA
+configure trainer
+evaluation
+checkpointing
+tensorboard logging
+early stopping
+resume training
+Save only LoRA adapters.
+Use production-quality code.
+
+Prompt 7 — Evaluation
+Generate an evaluation notebook.
+Evaluate:
+validation loss
+sample predictions
+instruction following
+response quality
+hallucination
+rule adherence
+Generate a markdown report.
+Do not build chatbot yet.
+
+Prompt 8 — Merge LoRA
+Generate a notebook that merges the LoRA adapter into the MedGemma base model.
+Export:
+merged model
+tokenizer
+config
+Verify the merged model loads successfully.
+
+Prompt 9 — Inference
+Generate an inference notebook.
+Load the merged MedGemma model.
+Accept a user query.
+Generate a response.
+Show:
+latency
+token count
+generation parameters
+Support streaming generation.
+Do not use vector search yet.
+
+Prompt 10 — RAG Integration
+Generate a simple chatbot notebook.
+Architecture:
+User Query
+↓
+Databricks Vector Search
+↓
+Retrieve FAQ / Learning Content / Recipes
+↓
+Fine tuned MedGemma
+↓
+Response
+Use only retrieved documents as context.
+Do not inject the old clinical guideline prompt.
+The model has already learned organizational behavior through fine tuning.
+Keep the chatbot minimal.
+
+Prompt 11 — Benchmark
+Generate a benchmark notebook.
+Compare:
+Current Llama 70B chatbot
+vs
+Fine tuned MedGemma chatbot
+Evaluate:
+Latency
+Response Quality
+Rule Adherence
+Safety
+Hallucination
+Context Usage
+Token Usage
+Generate a comparison report.
+
+Prompt 12 — Production Readiness
+Review the entire fine tuning pipeline.
+Evaluate:
+Dataset
+Training
+Evaluation
+Inference
+RAG Integration
+Suggest improvements before production deployment.
+Generate a readiness score out of 100.
+Produce a final markdown report.
