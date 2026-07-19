@@ -1,0 +1,150 @@
+Prompt 1 — Baseline Evaluation (Before Fine-Tuning)
+I want to establish a baseline before fine-tuning MedGemma 27B.
+
+Generate a Databricks evaluation notebook that runs my complete evaluation dataset against the original MedGemma 27B model.
+
+Dataset format:
+- system
+- user
+- assistant (ground truth)
+
+For every example:
+
+1. Generate the model response.
+2. Compare it against the expected assistant response.
+3. Save both responses.
+4. Record latency.
+5. Record input tokens.
+6. Record output tokens.
+7. Record total generation time.
+
+Do not fine tune.
+
+Generate a file named:
+
+baseline_predictions.jsonl
+
+containing:
+
+- example_id
+- rule_id
+- category
+- user
+- expected_response
+- model_response
+- latency
+- token_count
+
+Prompt 2 — Automatic Evaluation
+Using baseline_predictions.jsonl, generate an evaluation notebook.
+
+Evaluate:
+
+- Rule adherence
+- Safety compliance
+- Tone consistency
+- Clinical boundary adherence
+- Refusal correctness
+- Hallucination
+- Formatting consistency
+- Response completeness
+
+Produce:
+
+Overall Score (/100)
+
+Score by rule
+
+Score by category
+
+Weakest rules
+
+Strongest rules
+
+Generate a Markdown report.
+
+Prompt 3 — Fine-Tune
+
+Run your QLoRA training.
+
+Prompt 4 — Evaluate the Fine-Tuned Model
+Run exactly the same evaluation dataset against the fine-tuned MedGemma model.
+
+Generate:
+
+finetuned_predictions.jsonl
+
+using the identical evaluation pipeline.
+
+Do not change any evaluation settings.
+
+Use the same prompts used for the baseline evaluation.
+
+Prompt 5 — Comparison Report
+Compare:
+
+baseline_predictions.jsonl
+
+and
+
+finetuned_predictions.jsonl
+
+Generate a complete comparison report.
+
+For every rule:
+
+- Baseline Score
+- Fine-tuned Score
+- Improvement
+- Regression
+
+Evaluate:
+
+- Rule adherence
+- Safety
+- Tone
+- Formatting
+- Hallucination
+- Refusal quality
+- Clinical compliance
+- Response similarity to ground truth
+- Latency
+- Token usage
+
+Generate:
+
+1. Executive Summary
+2. Overall Improvement (%)
+3. Rule-wise comparison
+4. Category-wise comparison
+5. Charts
+6. Confusion matrix
+7. Recommendations
+
+Assign an overall score out of 100 for both models.
+
+Recommend whether the fine-tuned model is ready for integration with the chatbot.
+
+Prompt 6 — Compare with Your Existing Llama 70B Chatbot
+I now have three systems:
+
+1. Current Llama 70B chatbot
+2. Original MedGemma 27B
+3. Fine-tuned MedGemma 27B
+
+Run the same evaluation dataset through all three systems.
+
+Generate a comparison report containing:
+
+- Response Quality
+- Clinical Safety
+- Rule Adherence
+- Tone
+- Consistency
+- Hallucination Rate
+- Response Time
+- Token Usage
+- Cost Estimate
+
+Recommend which model is best suited for production.
+
