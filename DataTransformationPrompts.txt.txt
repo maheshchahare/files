@@ -1,0 +1,231 @@
+Prompt 1 — FEATURE_ENGINEERING.md
+Using the previously generated DATA_INVENTORY.md as the source of truth, generate a production-ready markdown document named FEATURE_ENGINEERING.md.
+Objective:
+Design all derived physiological features required for building a Physiological Foundation Model (PFM).
+For every physiological signal (Blood Glucose, Blood Pressure, Weight, Activity, Exercise, Food, Sleep, Medication, Labs), define:
+- Raw features
+- Rolling window features (5 min, 30 min, 2 hr, 24 hr, 7 day, 30 day)
+- Statistical features
+- Trend features
+- Variability features
+- Time-based features
+- Circadian features
+- Behavioral features
+- Clinical features
+- Cross-modal features
+Include examples such as:
+Blood Glucose
+- Time in Range
+- Time Above Range
+- Time Below Range
+- Glucose Variability
+- Rate of Change
+- Dawn Phenomenon
+- Meal Spike
+- Overnight Stability
+Food
+- Carb Load
+- Meal Frequency
+- Carb Density
+- Fasting Duration
+Exercise
+- Daily Minutes
+- Weekly Minutes
+- Intensity Score
+- Recovery Window
+Sleep
+- Sleep Efficiency
+- Sleep Consistency
+- Sleep Debt
+Medication
+- Adherence
+- Missed Dose Rate
+- Time Since Last Dose
+Also identify which features should be:
+- Input Features
+- Prediction Targets
+- Auxiliary Targets
+- Evaluation Metrics
+Do not invent unavailable data.
+Use only signals documented in DATA_INVENTORY.md.
+
+Prompt 2 — EVENT_TAXONOMY.md
+Using DATA_INVENTORY.md, generate EVENT_TAXONOMY.md.
+Objective:
+Define the canonical event vocabulary for the Physiological Foundation Model.
+For every physiological modality define:
+- Event Name
+- Event Category
+- Event Type
+- Required Attributes
+- Optional Attributes
+- Timestamp Semantics
+Examples include:
+Blood Glucose Reading
+Blood Pressure Reading
+Weight Measurement
+Meal Logged
+Exercise Started
+Exercise Completed
+Sleep Started
+Sleep Ended
+Medication Taken
+Lab Result
+For every event define:
+Required Fields
+PatientID
+Timestamp
+Event Type
+Source
+Device
+Measurement
+Unit
+Quality Flag
+Missing Flag
+Confidence Score
+Also define:
+Temporal Events
+TIME_DELTA
+DAY_OF_WEEK
+TIME_OF_DAY
+MONTH
+WEEKEND
+HOLIDAY
+Describe how these events will later become training sequences for the transformer.
+Generate stakeholder-quality markdown.
+
+Prompt 3 — CLINICAL_CONSTRAINTS.md
+Generate CLINICAL_CONSTRAINTS.md.
+Objective:
+Document every physiological constraint required before training a healthcare foundation model.
+For every physiological signal document:
+Normal Range
+Clinical Range
+Critical Range
+Impossible Values
+Sensor Errors
+Missing Data Rules
+Outlier Rules
+Examples:
+Blood Glucose
+Valid Range
+Physiological Limits
+CGM Noise
+Compression Lows
+Blood Pressure
+Impossible SBP
+Impossible DBP
+SBP < DBP
+Heart Rate
+Valid BPM
+Weight
+Physiological Limits
+Exercise
+Impossible Duration
+Negative Calories
+Sleep
+Maximum Duration
+Food
+Negative Carbs
+Medication
+Impossible Dose
+Lab Results
+Unit Validation
+Also define:
+Cleaning Rules
+Interpolation Rules
+Filtering Rules
+Missing Value Handling
+Data Confidence Scoring
+Describe how these constraints will be enforced before transformer training.
+
+Prompt 4 — EVENT_GRANULARITY.md
+Generate EVENT_GRANULARITY.md.
+Objective:
+Determine the optimal temporal representation for Physiological Foundation Model training.
+Evaluate multiple sequence granularities.
+Include:
+Raw Event Stream
+5 Minute Windows
+15 Minute Windows
+30 Minute Windows
+Hourly Windows
+Daily Windows
+Weekly Windows
+For every option discuss:
+Advantages
+Disadvantages
+Memory Usage
+Training Complexity
+Clinical Interpretability
+Recommendation
+Also define:
+Sliding Window Strategy
+Sequence Length
+Overlap Strategy
+Padding
+Truncation
+Context Length
+Finally recommend the optimal granularity for learning physiological behaviour from our healthcare dataset.
+
+Prompt 5 — TRAINING_COHORT.md
+Generate TRAINING_COHORT.md.
+Objective:
+Define the patient selection strategy for Physiological Foundation Model pretraining.
+Include:
+Inclusion Criteria
+Minimum timeline length
+Minimum Blood Glucose readings
+Minimum Exercise events
+Minimum Food events
+Minimum Sleep events
+Minimum Weight records
+Minimum Medication records
+Exclusion Criteria
+Insufficient Timeline
+Corrupted Data
+High Missingness
+Noisy Sensors
+Large Timestamp Gaps
+Outlier Dominated Patients
+Describe:
+Patient Stratification
+Training Cohort
+Validation Cohort
+Test Cohort
+Cold Start Patients
+Longitudinal Patients
+Recommend the optimal cohort size for pretraining.
+
+Prompt 6 — PFM_PRETRAINING_OBJECTIVES.md
+Generate PFM_PRETRAINING_OBJECTIVES.md.
+Objective:
+Define the self-supervised learning objectives for our Physiological Foundation Model.
+Assume the model will be trained on chronological patient event sequences.
+Evaluate the following objectives:
+Masked Event Prediction
+Masked Measurement Prediction
+Next Event Prediction
+Next Blood Glucose Prediction
+Next Blood Pressure Prediction
+Future Meal Prediction
+Future Exercise Prediction
+Time Gap Prediction
+Representation Learning
+Contrastive Learning
+Multi-modal Representation Learning
+For every objective describe:
+Purpose
+Input
+Target
+Loss Function
+Advantages
+Disadvantages
+Clinical Value
+Finally recommend:
+Primary Pretraining Objective
+Secondary Objectives
+Evaluation Metrics
+Expected Learned Representations
+How these representations will later support downstream tasks such as glucose prediction, hypertension risk prediction, lifestyle coaching and patient trajectory modelling.
+Generate a production-ready engineering design document.
