@@ -1,0 +1,125 @@
+Prompt 1 – Discover all healthcare datasets
+I am building a Physiological Foundation Model (PFM) for healthcare.
+
+The first phase is understanding all available patient data.
+
+Analyze all healthcare-related tables available in this Databricks workspace.
+
+For every table identify:
+
+- Catalog
+- Schema
+- Table name
+- Description (inferred from schema)
+- Primary purpose
+- Number of records
+- Number of patients (if available)
+- Date range
+- Timestamp columns
+- Primary key
+- Foreign keys
+- Partition columns
+- Whether the table represents:
+    - Physiological measurements
+    - Activity
+    - Nutrition
+    - Medication
+    - Device data
+    - Patient demographics
+    - Clinical events
+    - Other
+
+Do not generate markdown yet.
+
+Return the results as structured tables.
+
+Prompt 2 – Analyze every physiological signal
+Using the healthcare tables identified previously, analyze every physiological signal.
+
+For each signal identify:
+
+- Signal name
+- Source table
+- Column name
+- Data type
+- Unit of measurement
+- Sampling frequency
+- Timestamp column
+- Typical value range
+- Clinical meaning
+- Missing percentage
+- Whether manually entered or device generated
+
+Examples include:
+
+- Blood Glucose
+- Blood Pressure
+- Weight
+- Heart Rate
+- Steps
+- Calories
+- Food
+- Exercise
+- Sleep
+- Medication
+- A1C
+
+Return the results as a structured table.
+
+Do not generate markdown yet.
+
+Prompt 3 – Generate DATA_INVENTORY.md
+Using the previous analysis, generate a production-ready markdown document named:
+
+DATA_INVENTORY.md
+
+The document should contain:
+
+# Purpose
+
+Explain why a data inventory is required before building a Physiological Foundation Model.
+
+# Data Sources
+
+For every healthcare dataset provide:
+
+- Source system
+- Table name
+- Description
+- Patient coverage
+- Time coverage
+- Refresh frequency
+- Record count
+
+# Physiological Signals
+
+For every physiological signal provide:
+
+- Signal
+- Source table
+- Column
+- Unit
+- Sampling frequency
+- Timestamp semantics
+- Data quality considerations
+
+# Data Relationships
+
+Describe how the datasets are related using patient identifiers and timestamps.
+
+# Data Readiness
+
+Summarize:
+
+- Strengths
+- Gaps
+- Missing modalities
+- Recommended improvements
+
+# Next Steps
+
+Explain why DATA_PROFILE.md is the next document to create.
+
+Do not invent fields or assumptions.
+Only use information discovered from the Databricks tables.
+
