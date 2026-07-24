@@ -1,0 +1,230 @@
+Prompt 1 — Generate PFM_PIPELINE_ARCHITECTURE.md
+We have completed the design phase of our Physiological Foundation Model (PFM).
+The following design documents already exist:
+- DATA_INVENTORY.md
+- FEATURE_ENGINEERING.md
+- EVENT_TAXONOMY.md
+- CLINICAL_CONSTRAINTS.md
+- EVENT_GRANULARITY.md
+- TRAINING_COHORT.md
+- PFM_PRETRAINING_OBJECTIVES.md
+Using these documents as the source of truth, generate a comprehensive engineering document named:
+PFM_PIPELINE_ARCHITECTURE.md
+The objective is to define the complete end-to-end data pipeline that converts raw healthcare data into transformer-ready training sequences.
+The document should include:
+1. High-level architecture
+2. Pipeline stages
+3. Input and output of every stage
+4. Module dependencies
+5. Folder structure
+6. Data flow diagram
+7. Error handling strategy
+8. Logging strategy
+9. Configuration management
+10. Data validation strategy
+11. Performance considerations
+12. Incremental processing strategy
+13. Parallelization opportunities
+14. Intermediate datasets
+15. Final outputs for transformer pretraining
+For every module specify:
+- Purpose
+- Inputs
+- Outputs
+- Responsibilities
+- Dependencies
+- Failure conditions
+- Expected artifacts
+Do not generate any code.
+Generate only a production-ready markdown document.
+
+Prompt 2 — extract.py
+Using PFM_PIPELINE_ARCHITECTURE.md, generate extract.py.
+Responsibilities:
+- Read all healthcare source tables.
+- Support incremental loading.
+- Standardize schemas.
+- Preserve original timestamps.
+- Preserve units.
+- Preserve patient identifiers.
+- Produce Bronze datasets.
+Include:
+- configuration
+- logging
+- error handling
+- retry logic
+- unit-testable functions
+Do not implement business logic.
+Only extract data.
+Generate production-quality Python code.
+
+Prompt 3 — clinical_validator.py
+Generate clinical_validator.py.
+Use CLINICAL_CONSTRAINTS.md.
+Responsibilities:
+- Validate physiological ranges
+- Remove impossible values
+- Detect duplicates
+- Validate timestamps
+- Detect unit inconsistencies
+- Flag missing values
+- Assign quality scores
+Do not discard records unless explicitly invalid.
+Output validated events with quality metadata.
+Generate production-ready Python code.
+
+Prompt 4 — canonical_event_builder.py
+Generate canonical_event_builder.py.
+Use:
+DATA_INVENTORY.md
+EVENT_TAXONOMY.md
+Responsibilities:
+Convert every healthcare table into one canonical event schema.
+Support:
+Blood Glucose
+Blood Pressure
+Weight
+Exercise
+Food
+Sleep
+Medication
+Labs
+Goals
+Output:
+canonical_events.parquet
+Generate modular production-quality code.
+Include mapping classes for every event type.
+
+Prompt 5 — feature_engineering.py
+Generate feature_engineering.py.
+Use FEATURE_ENGINEERING.md.
+Responsibilities:
+Generate engineered physiological features.
+Examples:
+Time in Range
+Glucose Variability
+Rolling averages
+Meal response
+Exercise response
+Sleep efficiency
+Weight trend
+Medication adherence
+Support configurable rolling windows.
+Output:
+engineered_features.parquet
+Generate production-ready modular code.
+
+Prompt 6 — temporal_alignment.py
+Generate temporal_alignment.py.
+Use EVENT_GRANULARITY.md.
+Responsibilities:
+Merge all event streams.
+Sort chronologically.
+Generate TIME_DELTA events.
+Generate:
+TIME_OF_DAY
+DAY_OF_WEEK
+MONTH
+WEEKEND
+HOLIDAY
+Handle simultaneous events.
+Support configurable event granularity.
+Output:
+aligned_event_stream.parquet
+Generate production-ready Python code.
+
+Prompt 7 — event_tokenizer.py
+Generate event_tokenizer.py.
+Use EVENT_TAXONOMY.md.
+Responsibilities:
+Convert canonical events into transformer-ready tokens.
+Generate:
+Event IDs
+Continuous measurement vectors
+Time embeddings
+Context embeddings
+Quality embeddings
+Source embeddings
+Support future vocabulary expansion.
+Output:
+tokenized_events.parquet
+Generate production-ready code.
+
+Prompt 8 — sequence_builder.py
+Generate sequence_builder.py.
+Use:
+TRAINING_COHORT.md
+EVENT_GRANULARITY.md
+Responsibilities:
+Create transformer training sequences.
+Support:
+Sliding windows
+Padding
+Truncation
+Sequence overlap
+Patient boundaries
+Train / Validation / Test split
+Output:
+train_sequences.parquet
+validation_sequences.parquet
+test_sequences.parquet
+Generate modular production-ready code.
+
+Prompt 9 — pretraining_dataset_builder.py
+Generate pretraining_dataset_builder.py.
+Use PFM_PRETRAINING_OBJECTIVES.md.
+Responsibilities:
+Generate datasets for:
+Masked Event Prediction
+Next Event Prediction
+Cross-modal Prediction
+Create labels.
+Create masks.
+Create attention masks.
+Generate PyTorch-ready datasets.
+Output:
+pretraining_dataset.parquet
+Generate production-ready code.
+
+Prompt 10 — config.py
+Generate config.py.
+Centralize all pipeline configuration.
+Include:
+Table names
+Sequence lengths
+Rolling windows
+Validation thresholds
+Temporal granularity
+Output locations
+Logging configuration
+Model configuration
+Support YAML configuration files.
+Generate production-ready code.
+
+Prompt 11 — pipeline_runner.py
+Generate pipeline_runner.py.
+Responsibilities:
+Execute every module in order.
+Pipeline:
+Extract
+↓
+Clinical Validation
+↓
+Canonical Events
+↓
+Feature Engineering
+↓
+Temporal Alignment
+↓
+Tokenization
+↓
+Sequence Builder
+↓
+Pretraining Dataset
+Support:
+Checkpointing
+Logging
+Retry
+Incremental processing
+Pipeline resume
+Generate production-ready orchestration code.
