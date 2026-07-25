@@ -1,0 +1,250 @@
+Prompt: Validate the PFM Training Dataset
+We have completed the complete Physiological Foundation Model (PFM) data pipeline.
+
+The pipeline stages executed are:
+
+1. Data Extraction
+2. Clinical Validation
+3. Canonical Event Builder
+4. Feature Engineering
+5. Temporal Alignment
+6. Event Tokenization
+7. Sequence Builder
+8. Pretraining Dataset Builder
+
+The output dataset is now ready for validation before any model pretraining.
+
+I do NOT want to train the model yet.
+
+Perform a comprehensive validation of the generated pretraining dataset and generate a production-ready markdown document named:
+
+PFM_DATASET_VALIDATION_REPORT.md
+
+The report should contain the following sections.
+
+# 1. Executive Summary
+
+- Overall dataset readiness
+- Pass / Warning / Fail status
+- Key findings
+- Recommendation on whether the dataset is ready for pretraining
+
+---
+
+# 2. Dataset Overview
+
+Report:
+
+- Total patients
+- Total sequences
+- Total events
+- Total tokens
+- Dataset size
+- Number of train sequences
+- Number of validation sequences
+- Number of test sequences
+
+---
+
+# 3. Cohort Statistics
+
+Analyse:
+
+- Patients per cohort
+- Timeline length distribution
+- Observation duration
+- Average events per patient
+- Median events per patient
+- Maximum events
+- Minimum events
+
+Provide summary tables and histograms where appropriate.
+
+---
+
+# 4. Sequence Statistics
+
+Report:
+
+- Average sequence length
+- Median sequence length
+- Maximum sequence length
+- Minimum sequence length
+- Padding percentage
+- Truncation percentage
+- Sliding window overlap statistics
+
+Identify whether the chosen sequence length is appropriate.
+
+---
+
+# 5. Event Distribution
+
+For every event type report:
+
+- Count
+- Percentage
+- Patient coverage
+- Mean occurrence
+- Standard deviation
+
+Highlight heavily imbalanced events.
+
+Generate charts where useful.
+
+---
+
+# 6. Temporal Analysis
+
+Analyse:
+
+- Delta-time distribution
+- Event density
+- Daily event frequency
+- Weekly event frequency
+- Missing periods
+- Long inactivity gaps
+- Timestamp ordering validation
+
+Verify that all sequences remain chronological.
+
+---
+
+# 7. Feature Validation
+
+For engineered features validate:
+
+- Missing percentage
+- Mean
+- Median
+- Standard deviation
+- Minimum
+- Maximum
+- Outliers
+
+Highlight suspicious feature distributions.
+
+---
+
+# 8. Clinical Validation
+
+Verify:
+
+- Physiological ranges
+- Impossible values
+- Sensor artefacts
+- Duplicate events
+- Unit consistency
+- Timestamp consistency
+
+Report all violations.
+
+---
+
+# 9. Tokenization Validation
+
+Validate:
+
+- Vocabulary size
+- Unknown tokens
+- Reserved tokens
+- Token frequency distribution
+- Rare tokens
+- Extremely common tokens
+
+Verify tokenizer consistency.
+
+---
+
+# 10. Masking Validation
+
+If masked-event pretraining is enabled:
+
+Report:
+
+- Mask percentage
+- Event types masked
+- Randomness validation
+- Label correctness
+
+Confirm masking follows the intended strategy.
+
+---
+
+# 11. Train / Validation / Test Split Validation
+
+Verify:
+
+- No patient leakage
+- No sequence leakage
+- Balanced distributions
+- Similar event distributions
+- Similar sequence lengths
+
+Highlight any leakage issues.
+
+---
+
+# 12. Data Quality Score
+
+Generate an overall quality score for:
+
+- Completeness
+- Consistency
+- Temporal quality
+- Clinical quality
+- Token quality
+- Sequence quality
+- Training readiness
+
+Provide scores from 0–100.
+
+---
+
+# 13. Sample Inspection
+
+Randomly inspect multiple sequences.
+
+Display:
+
+- Original events
+- Canonical events
+- Tokenized representation
+
+Verify that every transformation is correct.
+
+---
+
+# 14. Risks and Recommendations
+
+Identify:
+
+- Potential training risks
+- Data imbalance
+- Missing modalities
+- Low-quality signals
+- Suggested improvements
+
+Prioritize recommendations.
+
+---
+
+# 15. Final Readiness Assessment
+
+Provide one of:
+
+READY FOR PRETRAINING
+
+READY WITH MINOR IMPROVEMENTS
+
+NOT READY
+
+Justify the recommendation using evidence from the analysis.
+
+Important:
+
+- Use only the generated dataset.
+- Do not modify any data.
+- Do not perform model training.
+- Include tables, summary statistics and visualizations where appropriate.
+- Generate a stakeholder-ready engineering validation report.
