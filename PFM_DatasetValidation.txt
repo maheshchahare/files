@@ -591,3 +591,511 @@ Important:
 - Where assumptions are required, explicitly identify them.
 - If MIRA has limitations for any requirement, state them clearly and recommend appropriate adaptations rather than forcing the design.
 - Generate a stakeholder-ready engineering design document suitable for implementation.
+
+Prompt: PFM_TRAINING_IMPLEMENTATION_PLAN.md
+We have completed the design phase of our Physiological Foundation Model (PFM).
+
+The following engineering documents already exist and should be treated as the source of truth:
+
+- DATA_INVENTORY.md
+- FEATURE_ENGINEERING.md
+- EVENT_TAXONOMY.md
+- CLINICAL_CONSTRAINTS.md
+- EVENT_GRANULARITY.md
+- TRAINING_COHORT.md
+- PFM_PRETRAINING_OBJECTIVES.md
+- PFM_PIPELINE_ARCHITECTURE.md
+- PFM_DATASET_VALIDATION_REPORT.md
+- PFM_MODEL_ARCHITECTURE.md
+
+The dataset has been validated and marked:
+
+READY FOR PRETRAINING
+
+The selected backbone architecture is Microsoft's MIRA model.
+
+The next objective is NOT to write training code.
+
+Instead, generate a production-ready engineering implementation document named:
+
+PFM_TRAINING_IMPLEMENTATION_PLAN.md
+
+This document will act as the master implementation blueprint for developing, testing, training, evaluating and deploying the Physiological Foundation Model.
+
+------------------------------------------------------------
+1. Executive Summary
+------------------------------------------------------------
+
+Describe:
+
+- Project objective
+- Scope
+- Expected outcomes
+- Relationship with the Clinical SLM
+- Why this implementation plan exists
+
+------------------------------------------------------------
+2. Overall Repository Structure
+------------------------------------------------------------
+
+Design the complete project structure.
+
+Include folders for:
+
+configs/
+
+datasets/
+
+models/
+
+embeddings/
+
+losses/
+
+objectives/
+
+trainer/
+
+evaluation/
+
+inference/
+
+serving/
+
+checkpoints/
+
+tests/
+
+scripts/
+
+examples/
+
+documentation/
+
+Describe the responsibility of every folder.
+
+------------------------------------------------------------
+3. Module Development Roadmap
+------------------------------------------------------------
+
+List every implementation module in dependency order.
+
+For each module include:
+
+Purpose
+
+Responsibilities
+
+Inputs
+
+Outputs
+
+Dependencies
+
+Unit Tests
+
+Estimated complexity
+
+Recommended implementation order
+
+Include at minimum:
+
+config.py
+
+dataset.py
+
+dataloader.py
+
+embeddings.py
+
+mira_model.py
+
+objectives.py
+
+losses.py
+
+trainer.py
+
+callbacks.py
+
+checkpoint.py
+
+metrics.py
+
+evaluator.py
+
+inference.py
+
+train.py
+
+evaluate.py
+
+serve.py
+
+------------------------------------------------------------
+4. Development Milestones
+------------------------------------------------------------
+
+Define milestones from prototype to production.
+
+Example:
+
+Milestone 1
+
+Project Skeleton
+
+Milestone 2
+
+Dataset Loading
+
+Milestone 3
+
+Model Construction
+
+Milestone 4
+
+Loss Functions
+
+Milestone 5
+
+Training Loop
+
+Milestone 6
+
+Evaluation
+
+Milestone 7
+
+Inference
+
+Milestone 8
+
+Distributed Training
+
+Milestone 9
+
+Production Deployment
+
+Describe exit criteria for each milestone.
+
+------------------------------------------------------------
+5. Dataset Loading Strategy
+------------------------------------------------------------
+
+Describe:
+
+Reading tokenized sequences
+
+Streaming
+
+Memory mapping
+
+Shuffling
+
+Batching
+
+Padding
+
+Attention masks
+
+Sequence masks
+
+Distributed loading
+
+Performance optimisation
+
+------------------------------------------------------------
+6. Embedding Implementation
+------------------------------------------------------------
+
+Describe implementation of:
+
+Event Embeddings
+
+Continuous Value Embeddings
+
+Temporal Embeddings
+
+Positional Embeddings
+
+Context Embeddings
+
+Patient Embeddings
+
+Feature Embeddings
+
+Explain tensor dimensions and fusion strategy.
+
+------------------------------------------------------------
+7. MIRA Model Implementation
+------------------------------------------------------------
+
+Describe:
+
+Encoder implementation
+
+Attention layers
+
+Feed-forward layers
+
+Residual blocks
+
+Layer normalization
+
+Configuration objects
+
+Model initialization
+
+Parameter counts
+
+Checkpoint compatibility
+
+------------------------------------------------------------
+8. Self-Supervised Objectives
+------------------------------------------------------------
+
+Describe implementation of:
+
+Masked Event Prediction
+
+Masked Measurement Prediction
+
+Next Event Prediction
+
+Next Measurement Prediction
+
+Time Gap Prediction
+
+Contrastive Representation Learning (if applicable)
+
+For every objective specify:
+
+Input tensors
+
+Output tensors
+
+Labels
+
+Loss functions
+
+Metrics
+
+------------------------------------------------------------
+9. Training Framework
+------------------------------------------------------------
+
+Describe:
+
+Training loop
+
+Gradient accumulation
+
+Mixed precision
+
+Gradient clipping
+
+Learning-rate scheduler
+
+Optimizer
+
+Checkpoint saving
+
+Resume training
+
+Early stopping
+
+Logging
+
+Experiment tracking
+
+------------------------------------------------------------
+10. Evaluation Framework
+------------------------------------------------------------
+
+Describe evaluation before downstream fine-tuning.
+
+Include:
+
+Training loss
+
+Validation loss
+
+Embedding quality
+
+Nearest-neighbour analysis
+
+Patient retrieval
+
+UMAP / t-SNE
+
+Representation stability
+
+Sequence reconstruction
+
+Masked prediction accuracy
+
+------------------------------------------------------------
+11. Testing Strategy
+------------------------------------------------------------
+
+Define:
+
+Unit tests
+
+Integration tests
+
+Data validation tests
+
+Sequence validation
+
+Embedding validation
+
+Model forward-pass tests
+
+Loss validation
+
+Training sanity tests
+
+Inference tests
+
+Regression tests
+
+------------------------------------------------------------
+12. Experiment Tracking
+------------------------------------------------------------
+
+Recommend using MLflow.
+
+Describe:
+
+Experiment naming
+
+Hyperparameter logging
+
+Model versioning
+
+Metrics logging
+
+Artifact storage
+
+Dataset version tracking
+
+Checkpoint lineage
+
+------------------------------------------------------------
+13. Hardware Strategy
+------------------------------------------------------------
+
+Recommend hardware for:
+
+Prototype
+
+Medium-scale training
+
+Full production pretraining
+
+Estimate:
+
+GPU memory
+
+Storage
+
+CPU
+
+RAM
+
+Training duration
+
+------------------------------------------------------------
+14. Deployment Strategy
+------------------------------------------------------------
+
+Describe:
+
+Model packaging
+
+Model registry
+
+Versioning
+
+Batch inference
+
+Online inference
+
+Embedding service
+
+Integration with the Clinical SLM
+
+Integration with Vector Search
+
+Rollback strategy
+
+------------------------------------------------------------
+15. Risk Register
+------------------------------------------------------------
+
+Identify:
+
+Technical risks
+
+Training risks
+
+Data risks
+
+Scaling risks
+
+Operational risks
+
+For every risk include:
+
+Likelihood
+
+Impact
+
+Mitigation
+
+------------------------------------------------------------
+16. Implementation Timeline
+------------------------------------------------------------
+
+Estimate implementation effort for every module.
+
+Provide dependency-aware execution order.
+
+Identify modules that can be developed in parallel.
+
+------------------------------------------------------------
+17. Success Criteria
+------------------------------------------------------------
+
+Define measurable success criteria before moving to downstream fine-tuning.
+
+Examples:
+
+Training converges
+
+Stable validation loss
+
+Meaningful patient embeddings
+
+No data leakage
+
+Successful inference
+
+Checkpoint recovery
+
+Embedding quality
+
+------------------------------------------------------------
+18. Final Recommendation
+------------------------------------------------------------
+
+Provide the recommended implementation order and explain why this approach minimizes risk while maximizing code quality and maintainability.
+
+Important:
+
+- Do not generate Python code.
+- Generate only the engineering implementation plan.
+- Base all recommendations on the previously generated design documents.
+- Make this document detailed enough that each implementation module can later be generated independently with minimal ambiguity.
+- Assume Databricks, MLflow and distributed GPU training are available.
