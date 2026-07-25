@@ -248,3 +248,346 @@ Important:
 - Do not perform model training.
 - Include tables, summary statistics and visualizations where appropriate.
 - Generate a stakeholder-ready engineering validation report.
+
+Prompt: PFM_MODEL_ARCHITECTURE
+We have successfully completed the complete data engineering phase for our Physiological Foundation Model (PFM).
+
+The following design documents already exist and should be treated as the source of truth:
+
+- DATA_INVENTORY.md
+- FEATURE_ENGINEERING.md
+- EVENT_TAXONOMY.md
+- CLINICAL_CONSTRAINTS.md
+- EVENT_GRANULARITY.md
+- TRAINING_COHORT.md
+- PFM_PRETRAINING_OBJECTIVES.md
+- PFM_PIPELINE_ARCHITECTURE.md
+- PFM_DATASET_VALIDATION_REPORT.md
+
+The dataset validation report concluded:
+
+READY FOR PRETRAINING
+
+Our next objective is to design the complete model architecture before writing any training code.
+
+We are planning to use Microsoft's MIRA model as the backbone for the Physiological Foundation Model.
+
+Generate a production-ready engineering document named:
+
+PFM_MODEL_ARCHITECTURE.md
+
+The document should contain the following sections.
+
+------------------------------------------------------------
+1. Executive Summary
+------------------------------------------------------------
+
+Describe the objective of the Physiological Foundation Model.
+
+Explain why a Foundation Model is needed instead of traditional predictive models.
+
+Describe how this model will integrate with our fine-tuned MedGemma Clinical SLM.
+
+------------------------------------------------------------
+2. Why Microsoft MIRA
+------------------------------------------------------------
+
+Evaluate Microsoft MIRA against other candidate architectures including:
+
+- MOMENT
+- PatchTST
+- Chronos
+- Time-Series Transformer
+- TimeGPT (conceptually, where relevant)
+
+For every model compare:
+
+- strengths
+- weaknesses
+- scalability
+- multivariate support
+- irregular time-series support
+- self-supervised learning suitability
+- healthcare suitability
+
+Recommend whether MIRA is the best backbone for our use case and explain the reasoning.
+
+------------------------------------------------------------
+3. Overall Model Architecture
+------------------------------------------------------------
+
+Describe the complete architecture.
+
+Include a diagram showing:
+
+Healthcare Events
+        ↓
+Event Embeddings
+        ↓
+Temporal Embeddings
+        ↓
+Feature Embeddings
+        ↓
+Patient Context Embeddings
+        ↓
+MIRA Encoder
+        ↓
+Latent Patient Representation
+        ↓
+Task Heads
+
+Explain every block.
+
+------------------------------------------------------------
+4. Input Representation
+------------------------------------------------------------
+
+Describe how each event becomes a model input.
+
+Include:
+
+Event IDs
+
+Continuous values
+
+Time Delta
+
+Time of Day
+
+Day of Week
+
+Source
+
+Quality Score
+
+Context Features
+
+Engineered Features
+
+Explain how these are embedded before entering the transformer.
+
+------------------------------------------------------------
+5. Embedding Layer
+------------------------------------------------------------
+
+Describe:
+
+Event Embedding
+
+Value Embedding
+
+Temporal Embedding
+
+Positional Embedding
+
+Context Embedding
+
+Feature Embedding
+
+Patient Embedding
+
+State embedding dimensions and how they are combined.
+
+------------------------------------------------------------
+6. MIRA Encoder Configuration
+------------------------------------------------------------
+
+Recommend:
+
+Number of Layers
+
+Hidden Dimension
+
+Attention Heads
+
+Dropout
+
+Activation
+
+Normalization
+
+Maximum Sequence Length
+
+Context Window
+
+Expected Parameter Count
+
+Provide recommendations for:
+
+Prototype
+
+Production
+
+Large-scale Training
+
+------------------------------------------------------------
+7. Self-Supervised Learning Objectives
+------------------------------------------------------------
+
+Describe implementation of:
+
+Masked Event Prediction
+
+Masked Value Prediction
+
+Next Event Prediction
+
+Next Measurement Prediction
+
+Time Gap Prediction
+
+Cross-Modal Prediction
+
+Representation Learning
+
+For each objective describe:
+
+Inputs
+
+Targets
+
+Loss Function
+
+Evaluation
+
+------------------------------------------------------------
+8. Multi-Task Learning Heads
+------------------------------------------------------------
+
+Describe downstream heads for:
+
+Glucose Forecasting
+
+Hypoglycaemia Prediction
+
+Hyperglycaemia Prediction
+
+Blood Pressure Forecasting
+
+Weight Prediction
+
+Patient Similarity
+
+Lifestyle Recommendation
+
+Risk Prediction
+
+Explain how each head connects to the frozen or fine-tuned encoder.
+
+------------------------------------------------------------
+9. Training Strategy
+------------------------------------------------------------
+
+Describe:
+
+Curriculum Learning
+
+Batch Size
+
+Mixed Precision
+
+Optimizer
+
+Learning Rate Schedule
+
+Gradient Clipping
+
+Checkpointing
+
+Distributed Training
+
+Early Stopping
+
+Hardware Recommendations
+
+------------------------------------------------------------
+10. Representation Learning
+------------------------------------------------------------
+
+Explain how patient embeddings are learned.
+
+Describe:
+
+Embedding Extraction
+
+Patient Similarity
+
+Clustering
+
+Retrieval
+
+Longitudinal Tracking
+
+------------------------------------------------------------
+11. Evaluation Strategy
+------------------------------------------------------------
+
+Describe evaluation before downstream fine-tuning.
+
+Include:
+
+Loss Curves
+
+Embedding Quality
+
+Nearest Neighbour Analysis
+
+UMAP / t-SNE
+
+Representation Stability
+
+Cross-Patient Retrieval
+
+------------------------------------------------------------
+12. Model Serving Architecture
+------------------------------------------------------------
+
+Describe how the pretrained PFM integrates with:
+
+- Fine-tuned MedGemma Clinical SLM
+- Vector Search
+- Existing chatbot
+- Patient data services
+
+Include an architecture diagram.
+
+------------------------------------------------------------
+13. Future Roadmap
+------------------------------------------------------------
+
+Describe future improvements including:
+
+Additional physiological modalities
+
+Wearables
+
+ECG
+
+Continuous monitoring
+
+Federated Learning
+
+Multi-modal learning
+
+Model scaling
+
+------------------------------------------------------------
+14. Risks and Mitigations
+------------------------------------------------------------
+
+Identify technical risks and mitigation strategies.
+
+------------------------------------------------------------
+15. Final Recommendation
+------------------------------------------------------------
+
+Provide a final architecture recommendation and explain why it is appropriate for building a production-grade Physiological Foundation Model.
+
+Important:
+
+- Do not generate code.
+- Do not simplify the architecture.
+- Base all recommendations on the previously generated design documents.
+- Where assumptions are required, explicitly identify them.
+- If MIRA has limitations for any requirement, state them clearly and recommend appropriate adaptations rather than forcing the design.
+- Generate a stakeholder-ready engineering design document suitable for implementation.
