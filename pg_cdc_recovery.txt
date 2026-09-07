@@ -1,0 +1,233 @@
+I am building a custom PostgreSQL → Databricks CDC pipeline using PostgreSQL logical replication + wal2json, without Debezium/Kafka.
+
+IMPORTANT: Before modifying any code, inspect the existing codebase and understand the current CDC flow, checkpoint handling, replication slot handling, and error/recovery logic.
+
+I have identified a critical correctness issue:
+
+The current implementation appears to read from PostgreSQL's current `restart_lsn` as the starting point. This is unsafe.
+
+Example:
+
+- Our durable application checkpoint = LSN 100
+- Pipeline is down
+- PostgreSQL WAL advances
+- The replication slot's restart_lsn advances to LSN 200
+- WAL between 100 and 200 is no longer available
+- On restart, if the application simply starts reading from restart_lsn=200, changes 100→200 are silently skipped.
+
+This MUST NOT happen.
+
+The application must distinguish:
+
+1. NORMAL RECOVERY:
+   application_checkpoint >=? appropriate available WAL boundary and the required WAL is still available.
+   Resume from the application's durable CDC checkpoint.
+
+2. WAL GAP / DATA-LOSS RISK:
+   application_checkpoint is older than the WAL that is still available from the replication slot.
+   The application must NOT silently jump to restart_lsn.
+   It must detect the gap, stop normal CDC processing, mark the pipeline as OUT_OF_SYNC / RECOVERY_REQUIRED, and invoke the recovery/resync workflow.
+
+3. FIRST RUN:
+   There is no application checkpoint yet.
+   This must be handled separately from a WAL-gap condition.
+
+4. SLOT RESET / RECREATION:
+   If the replication slot has been recreated, advanced, invalidated, or otherwise changed, this must not be treated as normal continuation without validation.
+
+Before implementing anything, DO NOT immediately edit code.
+
+PHASE 1 — ANALYZE AND PRODUCE A PLAN ONLY
+
+First inspect the repository and produce a detailed implementation plan.
+
+The plan must specifically cover:
+
+A. Current architecture
+- Where the replication slot is created/read
+- Where restart_lsn is read
+- Where wal2json is consumed
+- Where the application checkpoint is stored
+- Where checkpoints are updated
+- When the replication slot is acknowledged/advanced
+- How failures/restarts are currently handled
+- Whether the application currently silently starts from restart_lsn
+
+B. Correct LSN safety model
+
+Clearly define the meaning of:
+
+- application/durable checkpoint LSN
+- replication slot restart_lsn
+- confirmed_flush_lsn
+- current WAL LSN
+- wal2json event/transaction LSN
+
+Explain exactly which comparisons are valid and which are not.
+
+Do NOT assume that restart_lsn is a safe starting checkpoint.
+
+C. Startup validation algorithm
+
+Design an explicit startup validation flow such as:
+
+1. Read durable application checkpoint.
+2. Read replication slot metadata.
+3. Determine whether the checkpoint can still be resumed safely.
+4. If required WAL is no longer available:
+   - DO NOT advance checkpoint
+   - DO NOT start consuming from restart_lsn
+   - DO NOT silently skip data
+   - mark OUT_OF_SYNC
+   - persist recovery state
+   - identify the affected LSN range
+   - invoke selective/full resync logic according to the recovery design.
+5. Only resume CDC when continuity has been established.
+
+Be precise about the exact LSN comparison and edge cases.
+
+D. Checkpoint/slot acknowledgement ordering
+
+Design the correct ordering so that we never acknowledge/advance the PostgreSQL replication slot before the corresponding data and control metadata are durably committed.
+
+The plan must address crash scenarios such as:
+
+- CDC event read → process crashes before Delta commit
+- Delta commit succeeds → checkpoint update fails
+- checkpoint update succeeds → process crashes before slot acknowledgement
+- slot acknowledgement succeeds → application data was not actually committed
+- multiple transactions/events in one batch
+- partial table processing
+
+The design must prioritize no silent data loss.
+
+E. Out-of-sync recovery
+
+The recovery design must support the architecture we discussed:
+
+- ~400 PostgreSQL tables
+- one logical replication slot
+- wal2json
+- custom CDC consumer
+- Delta targets
+- desire to selectively resync affected tables rather than blindly resync all tables.
+
+Evaluate how the existing code can determine affected tables.
+
+If the current implementation does NOT have sufficient durable metadata to guarantee selective recovery after WAL loss, explicitly state that limitation instead of pretending it is safe.
+
+F. Audit/change-history mechanism
+
+Evaluate whether we should implement a PostgreSQL-side audit/change-history table to survive long CDC outages.
+
+The audit mechanism should potentially capture:
+
+- schema_name
+- table_name
+- operation
+- transaction/XID
+- commit timestamp
+- LSN if safely available
+- enough information to identify tables changed during a lost-WAL interval.
+
+Do not assume a periodic metadata snapshot is sufficient.
+
+Evaluate trigger-based transactional auditing versus other options.
+
+G. State machine
+
+Propose explicit CDC states, for example:
+
+INITIALIZING
+RUNNING
+PAUSED
+WAL_GAP_DETECTED
+OUT_OF_SYNC
+RESYNC_REQUIRED
+RESYNCING
+RECOVERED
+FAILED
+
+Explain the transitions and what the application is allowed to do in each state.
+
+H. Observability
+
+Plan logging/metrics/alerts for:
+
+- application checkpoint
+- restart_lsn
+- confirmed_flush_lsn
+- current WAL LSN
+- LSN lag
+- WAL retention risk
+- detected WAL gap
+- recovery state
+- affected tables
+- resync status
+- last successful processing time.
+
+I. Tests
+
+Before implementation, propose tests specifically proving that silent data loss cannot occur.
+
+Include scenarios:
+
+1. Pipeline stopped briefly; WAL still available.
+2. Pipeline stopped long enough that checkpoint < restart_lsn.
+3. Application starts with no checkpoint.
+4. Slot recreated.
+5. Crash immediately before Delta commit.
+6. Crash immediately after Delta commit.
+7. Crash immediately before checkpoint persistence.
+8. Crash immediately after checkpoint persistence.
+9. Crash around slot acknowledgement.
+10. Multiple tables in the same transaction.
+11. DELETE events.
+12. Long outage with selective table resync.
+13. Audit metadata unavailable/corrupt.
+14. Restart during resync.
+
+PHASE 1 OUTPUT REQUIREMENT
+
+Do NOT modify source code yet.
+
+Give me:
+
+1. Current implementation assessment
+2. Identified correctness/data-loss risks
+3. Proposed architecture
+4. Exact startup LSN validation algorithm
+5. Checkpoint + slot acknowledgement protocol
+6. Out-of-sync/recovery design
+7. Audit/change-history design
+8. State machine
+9. Test plan
+10. Files/modules that will need modification
+11. Any assumptions or PostgreSQL/wal2json behavior that must be verified before implementation
+
+Then STOP and wait for my approval.
+
+PHASE 2 — IMPLEMENT ONLY AFTER MY APPROVAL
+
+After I approve the plan, implement it incrementally.
+
+Rules during implementation:
+
+- Never silently jump from application checkpoint to restart_lsn.
+- Never hide or swallow a WAL-gap condition.
+- Never mark data as successfully processed before the Delta transaction and checkpoint are durably committed.
+- Never advance/acknowledge the replication slot beyond data that has been durably processed.
+- Preserve existing functionality unless the plan explicitly changes it.
+- Add unit/integration tests for every failure scenario.
+- Add clear logs and error messages for WAL-gap detection.
+- Make recovery idempotent.
+- Make resync idempotent.
+- Do not introduce Debezium, Kafka, or another external CDC system.
+- Do not make assumptions about wal2json fields; inspect the actual implementation/configuration and verify the fields available in this project.
+- If a requirement cannot be guaranteed with the current architecture, explicitly say so rather than implementing a best-effort solution and calling it reliable.
+
+Most importantly:
+
+DATA LOSS MUST NEVER BE SILENT.
+
+If the application checkpoint is behind the oldest WAL position available from the slot, the system must fail safely into an explicit OUT_OF_SYNC / RECOVERY_REQUIRED state rather than starting from restart_lsn.
