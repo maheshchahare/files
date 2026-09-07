@@ -1,0 +1,460 @@
+We are at the final technical verification gate before implementation.
+
+The revised Phase 1 plan is now architecturally acceptable. The **only remaining correctness question** is the exact definition of the application watermark:
+
+> What exact LSN can we safely persist as `app_confirmed_lsn` such that it guarantees:
+> "All source changes represented up to this LSN have been durably applied to Delta"?
+
+Do NOT implement any production code yet.
+
+Do NOT modify `Postgre_DataIngestion_V4.py`.
+
+Do NOT create migrations, audit triggers, or recovery code.
+
+Your task now is to perform the disposable-slot experiments required to resolve this final question and then produce the final revised Phase 1 plan.
+
+---
+
+# 1. Verify wal2json COMMIT/LSN semantics
+
+Using a disposable PostgreSQL logical replication slot and disposable test tables only:
+
+Create several controlled transactions, including:
+
+### Test A — Single-row transaction
+
+Perform:
+
+BEGIN;
+INSERT/UPDATE/DELETE;
+COMMIT;
+
+Inspect the output of:
+
+`pg_logical_slot_peek_changes()`
+
+Record for every returned row:
+
+* tuple LSN
+* action (`B`, `I`, `U`, `D`, `C`)
+* wal2json payload
+* transaction identifier if available
+* transaction/end/commit LSN fields if present
+
+Determine:
+
+**Does the tuple LSN of the `C` record represent the actual transaction commit/end LSN?**
+
+Do not assume this. Show the observed evidence.
+
+---
+
+# 2. Verify multi-row transaction
+
+Create one transaction containing multiple changes:
+
+BEGIN;
+INSERT ...
+UPDATE ...
+DELETE ...
+INSERT ...
+COMMIT;
+
+Inspect every decoded record.
+
+Determine:
+
+* Which LSN belongs to each change?
+* Which LSN belongs to COMMIT?
+* Does the COMMIT LSN occur after all row-change LSNs?
+* Can the COMMIT LSN safely represent completion of the entire transaction?
+
+---
+
+# 3. Verify multiple transactions
+
+Create:
+
+Transaction A
+→ multiple changes
+→ COMMIT
+
+Transaction B
+→ multiple changes
+→ COMMIT
+
+Transaction C
+→ multiple changes
+→ COMMIT
+
+Peek the slot.
+
+Determine whether the returned records preserve transaction order and whether:
+
+`last COMMIT LSN`
+
+is a valid upper watermark for all completely decoded transactions before it.
+
+---
+
+# 4. Most important test — `upto_nchanges` truncation
+
+This is the critical experiment.
+
+Create a sufficiently large transaction containing many changes.
+
+Use a very small:
+
+`upto_nchanges`
+
+with:
+
+`pg_logical_slot_peek_changes()`
+
+Determine experimentally whether PostgreSQL/wal2json can return a partial transaction such as:
+
+BEGIN
+INSERT
+INSERT
+INSERT
+...
+
+without returning its COMMIT.
+
+Specifically answer:
+
+### Question 1
+
+Can `pg_logical_slot_peek_changes(..., upto_nchanges => N, ...)` split a transaction?
+
+### Question 2
+
+If it cannot split a transaction, does PostgreSQL instead return the complete transaction even if that exceeds `upto_nchanges`?
+
+### Question 3
+
+What exactly does `upto_nchanges` count?
+
+Do not rely on assumptions.
+
+---
+
+# 5. Verify the correct watermark if a batch ends at COMMIT
+
+If the final complete transaction returned by a peek ends with:
+
+`C @ LSN X`
+
+determine whether:
+
+`X`
+
+can safely be used as the application watermark.
+
+The required property is:
+
+> If `app_confirmed_lsn = X`, every source change belonging to every transaction through X has been durably applied to Delta.
+
+If this property holds, explicitly state why.
+
+If it does NOT hold, identify the correct alternative watermark.
+
+---
+
+# 6. Verify `pg_logical_slot_get_changes`
+
+Using a disposable slot, verify:
+
+`pg_logical_slot_get_changes(slot, upto_lsn, ...)`
+
+Determine:
+
+1. What records are returned?
+2. What happens when `upto_lsn` falls:
+
+   * before a transaction,
+   * inside a transaction,
+   * exactly at a transaction COMMIT,
+   * after a transaction COMMIT?
+3. What value does `confirmed_flush_lsn` have afterward?
+4. Does it become exactly the requested `upto_lsn`?
+5. Or does it become the actual logical decoding boundary/commit position?
+
+Record observed results.
+
+---
+
+# 7. Verify `pg_replication_slot_advance`
+
+Using a disposable slot:
+
+Test advancing to:
+
+1. a transaction boundary;
+2. an LSN inside a transaction;
+3. an LSN after the last decoded transaction.
+
+For each test inspect:
+
+* `confirmed_flush_lsn`
+* `restart_lsn`
+* decoded changes afterward.
+
+Determine exactly what PostgreSQL permits and what position the slot ultimately records.
+
+If advancing to an arbitrary LSN can skip a transaction or create an unsafe state, explicitly document that.
+
+The final implementation must only advance to a proven-safe boundary.
+
+---
+
+# 8. Verify crash/restart durability
+
+Using a disposable slot only:
+
+Record:
+
+`restart_lsn`
+`confirmed_flush_lsn`
+
+Then perform controlled slot advancement.
+
+Restart PostgreSQL if the environment allows it, or use the closest safe disposable test available.
+
+Determine whether slot positions can regress after PostgreSQL crash/recovery.
+
+The purpose is to validate the crash-safety assumptions in the Phase 1 plan.
+
+Do NOT perform destructive testing against the production slot.
+
+---
+
+# 9. Verify the final safety model
+
+After the experiments, explicitly validate these states:
+
+### State A
+
+`confirmed_flush_lsn == app_confirmed_lsn`
+
+Expected:
+
+NORMAL.
+
+### State B
+
+`confirmed_flush_lsn < app_confirmed_lsn`
+
+Expected:
+
+SAFE REPLAY.
+
+This is the intended crash window:
+
+Delta applied
+→ checkpoint persisted
+→ slot not yet advanced
+→ application checkpoint is ahead.
+
+### State C
+
+`confirmed_flush_lsn > app_confirmed_lsn`
+
+Expected:
+
+OUT_OF_SYNC / RECOVERY_REQUIRED.
+
+### State D
+
+`app_confirmed_lsn < restart_lsn`
+
+Expected:
+
+WAL_GAP_DETECTED / RECOVERY_REQUIRED.
+
+Confirm that these remain correct after the experimental findings.
+
+---
+
+# 10. Decide the final watermark definition
+
+Based on the experiments, choose ONE precise definition.
+
+Possible candidate:
+
+> `app_confirmed_lsn = LSN of the last fully committed transaction whose complete set of changes has been successfully applied to Delta and whose application checkpoint has been durably persisted.`
+
+But do not accept this definition merely because it sounds correct.
+
+Validate it against the actual PostgreSQL/wal2json behavior.
+
+If a different definition is required, replace it.
+
+The final plan must explicitly state:
+
+### Application watermark invariant
+
+"If `app_confirmed_lsn = X`, then ______."
+
+Fill the blank with a technically defensible statement based on the experiment.
+
+---
+
+# 11. Important distinction: peek vs consume
+
+The final plan must clearly document the difference between:
+
+`pg_logical_slot_peek_changes()`
+
+and
+
+`pg_logical_slot_get_changes()`
+
+and explain exactly how the implementation will use them.
+
+The intended design is:
+
+PEEK
+→ APPLY
+→ PERSIST APPLICATION WATERMARK
+→ ADVANCE SLOT
+
+Do not silently switch to a different architecture.
+
+If the experiments show that `get_changes()` is actually required for correctness, explain why before changing the architecture.
+
+---
+
+# 12. Update the Phase 1 plan
+
+After completing the experiments, update the previous Phase 1 plan.
+
+Only change sections that are affected by the findings.
+
+The revised plan must include:
+
+1. Final LSN definitions.
+2. Final watermark definition.
+3. Final startup safety algorithm.
+4. Final checkpoint ordering.
+5. Final slot advancement rule.
+6. Final crash-safety behavior.
+7. Final recovery behavior.
+8. Experimental evidence supporting the watermark.
+9. Any remaining assumptions.
+10. Any remaining unresolved questions.
+
+---
+
+# 13. Explicitly remove uncertainty where the experiment resolved it
+
+For example, if the experiment proves that:
+
+* wal2json emits COMMIT records,
+* the tuple LSN of COMMIT corresponds to the commit boundary,
+* `upto_nchanges` never splits transactions,
+* and advancing to that commit boundary is safe,
+
+then change the plan from:
+
+"must be experimentally verified"
+
+to:
+
+"verified in disposable-slot experiment; implementation may rely on this behavior."
+
+Do not leave already-resolved questions marked as unresolved.
+
+Conversely, if something cannot be conclusively established, keep it explicitly marked as an assumption or unresolved issue.
+
+---
+
+# 14. Final output format
+
+Return ONLY:
+
+## FINAL PHASE 1 PLAN — VERIFIED
+
+### A. Experimental Results
+
+Summarize each experiment and its observed result.
+
+### B. Final LSN Semantics
+
+Define:
+
+* `app_confirmed_lsn`
+* `restart_lsn`
+* `confirmed_flush_lsn`
+* batch watermark
+* transaction/commit LSN
+
+### C. Final Safety Invariant
+
+State the exact invariant.
+
+### D. Final Startup Decision Table
+
+Include:
+
+| Condition | State | Action |
+| --------- | ----- | ------ |
+| ...       | ...   | ...    |
+
+Cover all important combinations.
+
+### E. Final Processing Order
+
+Show:
+
+PEEK → APPLY → CHECKPOINT → SLOT ADVANCE
+
+with the exact rules.
+
+### F. Crash Scenarios
+
+Cover all crash points.
+
+### G. WAL Gap / Recovery
+
+Cover the full-resync fallback.
+
+### H. Remaining Assumptions / Risks
+
+Only include genuinely unresolved items.
+
+### I. Implementation Scope
+
+List exactly what will change in Phase 2.
+
+### J. Final Go/No-Go Assessment
+
+Give your own technical conclusion:
+
+**READY FOR IMPLEMENTATION**
+
+or
+
+**NOT READY — [specific unresolved issue]**
+
+---
+
+# ABSOLUTE RULE
+
+This is the FINAL verification gate.
+
+**Do not write or modify production code.**
+
+**Do not modify `Postgre_DataIngestion_V4.py`.**
+
+**Do not create audit triggers.**
+
+**Do not create migrations.**
+
+**Do not alter the real replication slot.**
+
+Use disposable test slots/tables only.
+
+After returning the verified final plan, STOP and wait for my approval.
+
+I will take the final plan for independent review before giving implementation approval.
