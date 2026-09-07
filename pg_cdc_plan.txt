@@ -1,0 +1,511 @@
+We need to revise and finalize the Phase 1 plan for the PostgreSQL → Databricks CDC pipeline before any implementation.
+
+You previously produced a Phase 1 analysis/plan for WAL-gap-safe CDC checkpointing. **Do not implement anything yet.** First update the plan based on the correctness concerns below and return the revised plan to me for final approval.
+
+## CRITICAL CORRECTNESS CONCERNS TO ADDRESS
+
+### 1. Do NOT require app_confirmed_lsn == confirmed_flush_lsn
+
+The previous plan proposed treating:
+
+`app_confirmed_lsn != confirmed_flush_lsn`
+
+as OUT_OF_SYNC.
+
+This is not correct under the proposed crash-safe ordering.
+
+Our intended ordering is:
+
+1. Read/peek WAL batch.
+2. Apply Delta MERGE operations successfully.
+3. Determine the application watermark.
+4. Persist the application checkpoint.
+5. Advance/acknowledge the PostgreSQL logical replication slot.
+
+Consider:
+
+* Before processing: app checkpoint = 100, slot confirmed_flush_lsn = 100.
+* CDC changes through LSN 120 are successfully applied to Delta.
+* Application checkpoint is durably updated to 120.
+* Process crashes BEFORE slot advancement.
+
+After restart it is valid for:
+
+* app_confirmed_lsn = 120
+* confirmed_flush_lsn = 100
+
+This is SAFE because the slot is simply behind the application checkpoint. Re-reading 100→120 should be safe because Delta MERGE/application processing must be idempotent.
+
+Therefore:
+
+**Do not use equality as the invariant.**
+
+Instead explicitly analyze the directional relationship:
+
+* `confirmed_flush_lsn < app_confirmed_lsn`
+  → potentially SAFE / replayable state.
+  → Do NOT automatically mark OUT_OF_SYNC.
+
+* `confirmed_flush_lsn == app_confirmed_lsn`
+  → normal synchronized state.
+
+* `confirmed_flush_lsn > app_confirmed_lsn`
+  → UNSAFE.
+  → The slot has advanced beyond what the application has durably recorded.
+  → Treat conservatively as OUT_OF_SYNC / RECOVERY_REQUIRED unless there is a rigorously proven explanation.
+
+Explain this distinction clearly in the revised plan.
+
+---
+
+## 2. Clearly distinguish restart_lsn from confirmed_flush_lsn
+
+The plan must explicitly state:
+
+`restart_lsn` is NOT the application's resume position.
+
+It represents the oldest WAL position that the logical replication slot may still need.
+
+The current implementation does not explicitly start decoding from `restart_lsn`; it calls the logical decoding function against the slot's current internal position.
+
+Therefore the real problem is not:
+
+"we need to start reading from restart_lsn."
+
+The real problem is:
+
+"we need to verify that the application's durable checkpoint is still compatible with the WAL retained by the slot."
+
+The revised plan must use this distinction consistently.
+
+---
+
+## 3. WAL GAP condition
+
+The plan should treat:
+
+`app_confirmed_lsn < restart_lsn`
+
+as a definitive WAL-gap condition, because the application checkpoint is older than the oldest WAL still retained for that slot.
+
+Example:
+
+* app checkpoint = 100
+* restart_lsn = 150
+
+The application cannot safely reconstruct changes from 100→150 from this slot.
+
+Therefore:
+
+`WAL_GAP_DETECTED → RECOVERY_REQUIRED`
+
+Do NOT silently start processing from the slot's current position.
+
+Do NOT assume that starting from restart_lsn is a safe recovery.
+
+Do NOT silently skip the missing range.
+
+---
+
+## 4. Define the exact meaning of app_confirmed_lsn
+
+This is extremely important.
+
+Do NOT simply assume:
+
+`app_confirmed_lsn = MAX(row.lsn)`
+
+without verifying what `row.lsn` represents in wal2json.
+
+The revised plan must investigate and document:
+
+* wal2json event structure.
+* transaction boundaries.
+* BEGIN/COMMIT information.
+* commit/end LSN semantics.
+* whether the LSN exposed on individual row changes is sufficient to represent "everything through this LSN has been durably applied."
+* how `pg_logical_slot_peek_changes()` behaves with transactions.
+* how `pg_logical_slot_get_changes()` behaves with `upto_lsn`.
+* how `pg_replication_slot_advance()` affects the slot.
+* which exact LSN should become the application checkpoint after a batch is successfully applied.
+
+The final implementation must have a formally defined watermark:
+
+> "If app_confirmed_lsn = X, then all source changes that must be represented up to X have been durably applied to Delta."
+
+Do not proceed with implementation until this definition is technically justified.
+
+If necessary, propose a small controlled PostgreSQL/wal2json experiment to empirically establish the correct LSN semantics before coding.
+
+---
+
+## 5. Verify PostgreSQL slot semantics rather than assuming them
+
+The revised plan must explicitly verify the behavior of:
+
+* `pg_replication_slots.restart_lsn`
+* `pg_replication_slots.confirmed_flush_lsn`
+* `pg_logical_slot_peek_changes()`
+* `pg_logical_slot_get_changes()`
+* `pg_replication_slot_advance()`
+
+Especially verify:
+
+1. What position `peek_changes()` actually reads from.
+2. What position `get_changes()` consumes.
+3. How `confirmed_flush_lsn` changes.
+4. Whether `pg_replication_slot_advance()` changes confirmed position exactly as assumed.
+5. What happens if the application crashes between:
+
+   * Delta MERGE
+   * application checkpoint persistence
+   * slot advancement.
+6. What happens to the slot position after PostgreSQL restart/crash.
+7. Whether slot state can move backwards after crash/recovery because of PostgreSQL checkpoint durability.
+8. Exact relationship, if any, between `restart_lsn` and `confirmed_flush_lsn`.
+
+Do not infer undocumented behavior. If something cannot be proven from PostgreSQL documentation, mark it as an item requiring a controlled experiment.
+
+---
+
+## 6. Re-evaluate the proposed checkpoint ordering
+
+The intended safe ordering is:
+
+1. Decode/peek changes.
+2. Apply all required Delta MERGEs successfully.
+3. Determine the exact application watermark.
+4. Persist per-table/application checkpoint.
+5. Only after durable checkpoint persistence, advance the logical replication slot.
+
+The revised plan must explain why this ordering is safe.
+
+It must also explain the crash cases:
+
+### Crash before Delta MERGE completes
+
+Expected:
+
+* checkpoint remains old.
+* slot remains old.
+* batch is replayed.
+
+### Crash after Delta MERGE but before checkpoint persistence
+
+Expected:
+
+* checkpoint remains old.
+* slot remains old.
+* changes are replayed.
+* Delta operations must be idempotent.
+
+### Crash after checkpoint persistence but before slot advancement
+
+Expected:
+
+* application checkpoint may be ahead of slot confirmed_flush_lsn.
+* this is SAFE.
+* next run may replay already-applied changes.
+* MERGE must be idempotent.
+
+### Crash after slot advancement
+
+Expected:
+
+* slot confirmed position may be at/after the application checkpoint depending on exact operation semantics.
+* explain how the implementation guarantees that this cannot result in the slot moving beyond an uncommitted application checkpoint.
+
+This section must be precise.
+
+---
+
+## 7. Define the startup validation algorithm
+
+Replace the previous equality-based algorithm with a directional, safety-first algorithm.
+
+The revised plan should explicitly define something similar to:
+
+### Case A — Normal
+
+If:
+
+`app_confirmed_lsn >= confirmed_flush_lsn`
+
+and:
+
+`app_confirmed_lsn >= restart_lsn`
+
+then determine whether normal processing/replay is safe.
+
+Do not automatically assume equality is required.
+
+### Case B — Slot behind application
+
+If:
+
+`confirmed_flush_lsn < app_confirmed_lsn`
+
+then:
+
+* do NOT declare data loss.
+* allow replay from the slot's current position.
+* rely on idempotent MERGE.
+* document why this is safe.
+
+### Case C — Slot ahead of application
+
+If:
+
+`confirmed_flush_lsn > app_confirmed_lsn`
+
+then:
+
+* mark OUT_OF_SYNC / RECOVERY_REQUIRED.
+* do not continue normal CDC.
+* investigate whether the slot was advanced externally or by an ordering bug.
+
+### Case D — WAL gap
+
+If:
+
+`app_confirmed_lsn < restart_lsn`
+
+then:
+
+* WAL_GAP_DETECTED.
+* stop normal CDC.
+* enter RECOVERY_REQUIRED.
+* never silently skip the missing range.
+
+Also handle:
+
+* first run / no application checkpoint.
+* NULL LSNs.
+* invalid/conflicting slot.
+* slot recreation.
+* slot identity mismatch.
+* corrupted/inconsistent checkpoint state.
+
+The revised plan should provide an explicit state-transition table.
+
+---
+
+## 8. Recovery strategy
+
+The revised plan must distinguish between two situations.
+
+### Situation 1 — WAL still available
+
+If the application checkpoint is behind the slot but the required WAL is still available:
+
+* replay safely.
+* do not resync unnecessarily.
+
+### Situation 2 — WAL is genuinely lost
+
+If:
+
+`app_confirmed_lsn < restart_lsn`
+
+then exact CDC continuation from that slot is impossible.
+
+If we have NO independent durable change-history mechanism:
+
+**Full resync of all tables covered by this logical replication slot is the only conservative recovery.**
+
+Do NOT attempt to guess which tables changed using:
+
+* pg_stat_user_tables
+* n_tup_ins
+* n_tup_upd
+* n_tup_del
+* n_mod_since_analyze
+* xmin
+* commit timestamps
+* periodic metadata snapshots
+
+unless the plan explicitly demonstrates why the mechanism provides complete, durable coverage of all changes including deletes.
+
+Do not present these monitoring mechanisms as guaranteed CDC recovery.
+
+---
+
+## 9. Audit/change-history should remain a separate phase
+
+The previous plan proposed a PostgreSQL trigger-based audit/change-history table.
+
+Keep this as a future/optional recovery enhancement, not something to implement automatically in this phase.
+
+The revised plan should describe:
+
+* why periodic snapshots are insufficient for guaranteed recovery.
+* why transactionally written audit records are stronger.
+* how audit records could identify affected tables during a WAL gap.
+* how selective resync could eventually replace full resync.
+* retention requirements.
+* performance/operational overhead across ~400 tables.
+* whether exact commit LSN capture from a trigger is possible/reliable in our PostgreSQL environment.
+
+But clearly mark:
+
+**Phase 1 = core WAL-safe checkpointing and gap detection.**
+
+**Audit-based selective recovery = Phase 2 / separate approval.**
+
+Do not implement the audit mechanism now.
+
+---
+
+## 10. Per-table checkpoints vs slot-level checkpoint
+
+We have approximately 400 tables sharing one logical replication slot.
+
+The revised plan must clearly explain:
+
+* why a slot-level application watermark is required.
+* what role per-table checkpoints play.
+* whether per-table `last_end_lsn` values are sufficient.
+* whether they can ever disagree with the slot-level watermark.
+* what happens if some tables in a decoded batch succeed and others fail.
+* whether the batch must be treated transactionally from the application's perspective.
+* how partial table processing affects restart/replay.
+
+Do not assume per-table checkpoints automatically provide global CDC correctness.
+
+---
+
+## 11. Idempotency requirement
+
+The revised plan must explicitly define how Delta MERGE remains safe when a WAL batch is replayed.
+
+Explain:
+
+* primary-key matching.
+* update semantics.
+* insert semantics.
+* delete semantics.
+* duplicate event handling.
+* transaction/event ordering.
+* what happens when the same WAL transaction is processed twice.
+
+This is a core requirement because the safe checkpoint strategy intentionally allows replay.
+
+---
+
+## 12. Observability
+
+The final plan should specify metrics/logs for at least:
+
+* app_confirmed_lsn
+* confirmed_flush_lsn
+* restart_lsn
+* current WAL/insert LSN if available
+* LSN distance between application and slot
+* WAL retention/headroom
+* CDC state
+* last successful batch
+* last successful checkpoint
+* WAL gap detection
+* slot-ahead condition
+* replay count
+* recovery/resync status
+
+The system must make it obvious to an operator whether:
+
+* CDC is healthy.
+* slot is behind application.
+* slot is ahead of application.
+* WAL retention is becoming dangerous.
+* recovery is required.
+
+---
+
+## 13. Testing plan must prove correctness
+
+The revised plan must include concrete tests for:
+
+1. Normal CDC.
+2. Empty WAL.
+3. Crash before MERGE.
+4. Crash after MERGE but before checkpoint.
+5. Crash after checkpoint but before slot advancement.
+6. Slot behind application checkpoint.
+7. Slot ahead of application checkpoint.
+8. `app_confirmed_lsn < restart_lsn`.
+9. Invalid/conflicting slot.
+10. Slot recreation.
+11. Duplicate WAL replay.
+12. Multi-table transaction.
+13. Multiple transactions in one batch.
+14. Failed MERGE for one table.
+15. PostgreSQL restart during CDC.
+16. Application restart during CDC.
+17. Full resync after WAL loss.
+
+Most importantly, the tests must demonstrate:
+
+**No silent data loss.**
+
+---
+
+# REQUIRED OUTPUT
+
+Do NOT modify code.
+
+Do NOT implement anything.
+
+Do NOT create migrations.
+
+Do NOT create audit triggers.
+
+Do NOT commit anything.
+
+Instead:
+
+### Step 1
+
+Review your previous Phase 1 plan against every concern above.
+
+### Step 2
+
+Produce a completely revised Phase 1 plan.
+
+The revised plan should contain:
+
+1. Current implementation assessment.
+2. Correct CDC safety model.
+3. Exact definitions of:
+
+   * app_confirmed_lsn
+   * confirmed_flush_lsn
+   * restart_lsn
+   * batch watermark
+4. Startup validation algorithm.
+5. Correct checkpoint/slot advancement ordering.
+6. Crash-safety analysis.
+7. Recovery state machine.
+8. WAL-gap recovery strategy.
+9. Per-table vs slot-level checkpoint design.
+10. Idempotency design.
+11. Observability.
+12. Test strategy.
+13. PostgreSQL/wal2json semantics that must be experimentally verified.
+14. Assumptions and unresolved questions.
+15. Files/modules that would eventually need modification.
+16. Explicit list of what is OUT OF SCOPE for Phase 1.
+
+### Step 3 — FINAL REVIEW GATE
+
+At the very end, provide a section:
+
+## FINAL APPROVAL CHECKLIST
+
+List every architectural decision that still requires my approval.
+
+Do NOT ask me to approve individual implementation details that are already logically determined.
+
+Then STOP.
+
+**Wait for my approval before writing or modifying any code.**
+
+The next response from you should therefore be the revised plan only, not implementation.
