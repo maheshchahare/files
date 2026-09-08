@@ -1,0 +1,1189 @@
+# Task: Create a Detailed Architecture and Design Document for the PostgreSQL → Databricks CDC Pipeline
+
+You are acting as a **Principal Data Architect / Distributed Systems Architect** reviewing and documenting an internally developed PostgreSQL CDC ingestion system.
+
+I need you to create a **professional, detailed Architecture and Design Document (ADD)** for the current PostgreSQL → Databricks CDC solution.
+
+The document must be suitable for:
+
+* technical design review
+* architecture review
+* senior engineering/management review
+* future maintenance by another engineer
+* production readiness discussion
+* PhD/research-quality technical documentation where appropriate
+
+Do NOT redesign the system unnecessarily. Document the architecture that has actually been implemented and empirically validated, while clearly separating implemented functionality from deferred/future work.
+
+---
+
+# 1. SOURCE MATERIAL — USE THE REPOSITORY AND EXISTING REPORTS
+
+First inspect the entire repository/codebase and all relevant tests/reports available in the current Claude session.
+
+Important files/components include:
+
+* `Postgre_DataIngestion_V4.py`
+* existing tests
+* Phase 1 implementation/report
+* Phase 2 Stages 0–3 implementation/report
+* remaining-WP investigation report for WP1/WP2/WP5/WP7
+* configuration/constants
+* Delta control tables
+* PostgreSQL slot/control logic
+* recovery logic
+* monitoring/alerting logic
+
+Do not rely only on filenames. Search the repository and understand how the components actually interact.
+
+Before writing the document:
+
+1. Inspect the implementation.
+2. Inspect the tests.
+3. Inspect the Phase 1 and Phase 2 reports.
+4. Identify the actual current architecture.
+5. Identify what is empirically proven.
+6. Identify what is only theoretically supported.
+7. Identify what was investigated but intentionally NOT implemented.
+8. Identify any remaining risks/limitations.
+
+If there is a conflict between an old document and the current code, **the current implementation and latest validated report take precedence**, but explicitly mention the discrepancy if architecturally relevant.
+
+Do not invent functionality.
+
+---
+
+# 2. SYSTEM CONTEXT
+
+The system is an internally developed CDC pipeline replacing Fivetran for PostgreSQL → Databricks ingestion.
+
+Core architecture:
+
+PostgreSQL
+→ Logical Replication
+→ `wal2json`
+→ Custom CDC Consumer
+→ Delta Lake / Unity Catalog
+→ downstream Databricks workloads
+
+Important constraints:
+
+* PostgreSQL logical replication is used.
+* `wal2json` is used for logical decoding.
+* One logical replication slot is used for the current design.
+* The CDC consumer is custom-built.
+* Databricks Delta tables are the target.
+* No Debezium.
+* No Kafka.
+* No database triggers.
+* No external CDC framework.
+* Do not introduce these technologies into the architecture.
+* Do not propose replacing the current design with Debezium/Kafka unless explicitly presented as a separate alternative architecture, and even then clearly state that it is outside the current scope.
+
+The current target scale is approximately **400 tables**, with approximately **117 eligible tables in the current environment**.
+
+Expected CDC latency target is approximately **5 minutes**.
+
+---
+
+# 3. MOST IMPORTANT ARCHITECTURAL SAFETY INVARIANT
+
+The architecture must clearly explain and preserve this ordering:
+
+PEEK
+→ APPLY
+→ determine verified COMMIT LSN
+→ PERSIST application state
+→ ADVANCE logical replication slot
+→ VERIFY actual slot position
+
+Explain this sequence in detail.
+
+The document must make clear why this ordering exists and what failure would occur if slot advancement happened before durable application-state persistence.
+
+Explicitly explain:
+
+### Safe principle
+
+The system must never advance the PostgreSQL logical replication slot beyond data whose successful application and checkpoint persistence have not been durably recorded.
+
+The document should explain the failure scenarios:
+
+1. Crash before APPLY
+2. Crash during APPLY
+3. Crash after APPLY but before PERSIST
+4. Crash after PERSIST but before ADVANCE
+5. Crash after ADVANCE
+6. Process restart
+7. Databricks failure
+8. Delta persistence failure
+9. PostgreSQL slot error
+
+For every scenario explain:
+
+* slot state
+* application checkpoint state
+* what happens on restart
+* whether replay occurs
+* why replay is safe/idempotent
+* whether data loss is possible
+* whether duplicates are possible
+* how recovery handles the situation
+
+---
+
+# 4. PostgreSQL LOGICAL REPLICATION / WAL MODEL
+
+Provide a technically accurate explanation of:
+
+* WAL
+* logical decoding
+* logical replication slot
+* `restart_lsn`
+* `confirmed_flush_lsn`
+* `wal_status`
+* `safe_wal_size` if available
+* `conflicting`
+* `pg_current_wal_lsn()`
+* `pg_logical_slot_peek_changes()`
+* `pg_logical_slot_get_changes()`
+* `pg_replication_slot_advance()`
+
+Very important:
+
+Clearly distinguish:
+
+### `restart_lsn`
+
+from
+
+### `confirmed_flush_lsn`
+
+and from
+
+### application checkpoint / application-confirmed LSN.
+
+Explain why:
+
+> `restart_lsn` is a WAL retention floor and NOT the application resume point.
+
+Explain why:
+
+> `confirmed_flush_lsn` represents the logical slot's confirmed consumer position and must not automatically be treated as the same thing as the application's durable checkpoint.
+
+Explain why the application checkpoint must represent a **verified transaction-complete COMMIT LSN**.
+
+---
+
+# 5. TRANSACTION SEMANTICS
+
+This section must be detailed.
+
+Explain the relationship between:
+
+* BEGIN
+* row changes
+* COMMIT
+* LSN
+* transaction boundaries
+* logical decoding
+* wal2json output
+* batching
+
+Explain why a row's LSN should not automatically be used as the application watermark.
+
+Explain the implemented logic for finding the last verified COMMIT LSN.
+
+Use examples such as:
+
+BEGIN
+→ INSERT
+→ UPDATE
+→ DELETE
+→ COMMIT
+
+and explain why the COMMIT LSN is the correct transaction-complete watermark.
+
+Also explain the implications of multi-table transactions.
+
+---
+
+# 6. CURRENT DATA FLOW
+
+Create a detailed end-to-end data-flow description.
+
+Include:
+
+1. Pipeline startup
+2. Slot discovery
+3. Slot state inspection
+4. Safety classification
+5. WAL peeking
+6. WAL parsing
+7. transaction handling
+8. table routing
+9. Delta application
+10. checkpoint calculation
+11. checkpoint persistence
+12. audit persistence
+13. slot-state persistence
+14. slot advancement
+15. advancement verification
+16. run-history persistence
+17. monitoring/alert generation
+18. successful completion
+
+Provide both:
+
+* a high-level flow
+* a low-level sequence
+
+---
+
+# 7. ARCHITECTURE DIAGRAMS
+
+Create Mermaid diagrams where appropriate.
+
+At minimum provide:
+
+### Diagram 1 — High-level architecture
+
+PostgreSQL → logical replication slot → wal2json → custom CDC consumer → Delta/Unity Catalog
+
+### Diagram 2 — Detailed CDC processing flow
+
+PEEK → APPLY → verified COMMIT → PERSIST → ADVANCE → VERIFY
+
+### Diagram 3 — Failure/recovery architecture
+
+Show:
+
+* PostgreSQL
+* replication slot
+* CDC application state
+* Delta tables
+* recovery state machine
+* monitoring/alerts
+
+### Diagram 4 — State machine
+
+Show all implemented CDC states:
+
+* FIRST_RUN
+* NORMAL
+* SAFE_REPLAY
+* WAL_GAP_DETECTED
+* OUT_OF_SYNC
+* RECOVERY_REQUIRED
+* CORRUPT_STATE
+* RECOVERY_RUNNING
+* VALIDATING
+
+Explain valid/invalid transitions.
+
+Important:
+The current transition table/gate is advisory rather than a hard safety gate. Do not incorrectly represent it as a strict enforcement mechanism if the implementation does not enforce that.
+
+### Diagram 5 — Recovery sequence
+
+Show:
+
+Detection
+→ RECOVERY_RUNNING
+→ reload
+→ VALIDATING
+→ validation
+→ NORMAL
+
+Include restart/crash scenarios.
+
+---
+
+# 8. SLOT SAFETY MODEL
+
+Document the startup safety classification logic in detail.
+
+Current concepts include:
+
+### FIRST_RUN
+
+No persisted slot state exists.
+
+### NORMAL
+
+Application LSN and slot confirmed position are aligned appropriately.
+
+### SAFE_REPLAY
+
+Slot confirmed position is behind the application-confirmed LSN.
+
+Explain why replay can safely occur.
+
+### WAL_GAP_DETECTED
+
+Application-confirmed LSN is older than the available WAL retention floor.
+
+Explain why this means the incremental history cannot safely be reconstructed.
+
+### OUT_OF_SYNC
+
+Slot position is inconsistent with application state.
+
+### RECOVERY_REQUIRED
+
+System cannot safely continue incrementally.
+
+### CORRUPT_STATE
+
+Application checkpoint/state cannot be parsed or trusted.
+
+Explain every state:
+
+* trigger condition
+* meaning
+* allowed action
+* whether CDC continues
+* whether full recovery is required
+* safety rationale
+
+---
+
+# 9. SLOT IDENTITY / GENERATION TRACKING
+
+Document WP4.
+
+Explain:
+
+* why slot recreation is dangerous
+* why the slot name alone is insufficient as identity
+* what metadata PostgreSQL 18.4 exposes
+* what it does NOT expose
+* how `last_observed_restart_lsn` is used
+* how `slot_generation` UUID is used
+* why UUID is audit/traceability rather than a cryptographic proof of slot identity
+* how restart_lsn monotonicity is used as a documented invariant
+
+Explicitly document the validation limitation:
+
+The independent live restart_lsn-regression test could not conclusively prove the detector because restart_lsn catches up around checkpoint behavior and the test role lacked `pg_checkpoint`.
+
+Do not hide this limitation.
+
+---
+
+# 10. FORMAL RECOVERY STATE MACHINE
+
+Document WP3 in detail.
+
+Explain:
+
+* RECOVERY_RUNNING
+* VALIDATING
+* NORMAL after successful validation
+* incomplete recovery detection
+* restart behavior
+* validation scope
+
+Current recovery validation includes:
+
+* tables reloaded
+* table existence
+* row count
+
+It does NOT currently provide full:
+
+* row-level checksum
+* complete content reconciliation
+* source-vs-target hash comparison
+
+Clearly distinguish current validation from future stronger validation.
+
+---
+
+# 11. TABLE INITIAL LOAD / RECOVERY
+
+Explain how initial load works.
+
+Important architectural behavior:
+
+* Initial load uses a JDBC live snapshot.
+* Initial load does not advance the logical replication slot.
+* New/untracked tables can bootstrap using initial load.
+* Full recovery is possible when incremental recovery cannot safely continue.
+
+Explain concurrent source writes during recovery and the empirically validated behavior.
+
+The document should clearly explain the consistency limitations of a live JDBC snapshot versus a transactionally coordinated snapshot if applicable.
+
+Do not claim stronger consistency than was actually validated.
+
+---
+
+# 12. CHECKPOINT DESIGN
+
+Document the control/checkpoint model.
+
+Include:
+
+* `pipeline_checkpoint_v4`
+* `pipeline_slot_state_v4`
+* `pipeline_run_history_v4`
+
+Explain the responsibility of each table.
+
+Explain fields such as:
+
+* application-confirmed LSN
+* pending LSN if present
+* last_end_lsn
+* state
+* state reason
+* updated_at
+* last observed restart LSN
+* slot generation
+
+IMPORTANT:
+
+`last_end_lsn` currently exists in the schema/documentation but is NOT currently populated as an authoritative per-table watermark.
+
+Do not claim it provides working table-level recovery.
+
+Explain the difference between:
+
+### slot-level checkpoint
+
+and
+
+### table-level checkpoint.
+
+---
+
+# 13. WHY SELECTIVE TABLE RECOVERY IS NOT IMPLEMENTED
+
+Document WP1 as a deliberate architectural decision.
+
+Explain the blockers:
+
+1. No authoritative per-table LSN watermark.
+2. Multi-table transaction membership cannot be reconstructed safely once WAL is lost.
+3. DDL/schema changes are not fully represented by wal2json in the current design.
+4. Selective reload interacting with shared-slot incremental processing is not sufficiently proven.
+
+Explain why forcing selective recovery anyway could produce:
+
+* missed changes
+* stale rows
+* inconsistent tables
+* incorrect transaction reconstruction
+
+State that WP1 is **DEFERRED / NO-GO** under the current evidence.
+
+---
+
+# 14. INDEPENDENT RECOVERY SOURCE
+
+Document WP2.
+
+Discuss the investigated options:
+
+A. Extended WAL retention
+B. Delta time travel/snapshots
+C. PostgreSQL triggers/audit
+D. second logical replication slot / second consumer
+
+Current findings:
+
+* `max_slot_wal_keep_size = -1`
+* WAL retention is therefore already effectively unlimited from that setting.
+* Delta time travel/snapshots are the only additional candidate considered potentially useful.
+* Explicit retention tuning requires approval.
+* Triggers/audit were not selected.
+* Second logical slot/consumer would be an architectural change.
+
+Clearly separate:
+
+* implemented
+* investigated
+* rejected
+* deferred
+
+---
+
+# 15. AUTOMATIC SLOT RECOVERY
+
+Document WP5.
+
+Current position:
+
+* human-approved recovery remains the intended mechanism
+* automatic slot recreation/rebaseline is NOT implemented
+* no automatic `pg_drop_replication_slot()`
+* no automatic slot recreation
+* automatic recovery has not been proven safe under concurrency/timing conditions
+
+Explain why automatic slot recreation is dangerous.
+
+Do not propose implementing it unless explicitly requested.
+
+Classify WP5 as **NO-GO / deferred**.
+
+---
+
+# 16. MONITORING AND OBSERVABILITY
+
+Document WP6.
+
+Include:
+
+* `pipeline_run_history_v4`
+* repeated failure detection
+* repeated recovery detection
+* WAL gap alerts
+* lost slot alerts
+* conflicting slot alerts
+* OUT_OF_SYNC alerts
+* RECOVERY_REQUIRED alerts
+* near-restart-distance warning
+* excessive lag
+* repeated CDC failures
+* repeated recovery failures
+* persistence failures
+* unexpected slot advancement
+
+Include the relevant thresholds/configuration found in code.
+
+Explain:
+
+* what is monitored
+* why it matters
+* severity
+* recommended operational response
+
+---
+
+# 17. CURRENT PRODUCTION SLOT STATUS
+
+Include a clearly marked section:
+
+## Production Read-Only Verification
+
+Use the actual latest verified values from the reports/code investigation.
+
+Known values include:
+
+* PostgreSQL 18.4
+* slot: `databricks_sync_slot`
+* plugin: wal2json
+* restart_lsn: `DA/33002AA0`
+* confirmed_flush_lsn: `DA/3400D2D0`
+* wal_status: `extended`
+* conflicting: false
+* active: false
+* max_slot_wal_keep_size: -1
+* current WAL approximately `E9/3D003AC0`
+* approximately 60 GB logical/WAL distance between confirmed slot position and current WAL
+
+Explain carefully:
+
+This does NOT mean 60 GB of application data has been lost.
+
+It means the database has generated approximately 60 GB of WAL since the slot's confirmed position, and the slot is therefore retaining a significant WAL backlog.
+
+Explain why `wal_status=extended` is operationally important.
+
+Explain the risks:
+
+* PostgreSQL disk consumption
+* growing backlog
+* catch-up time
+* throughput requirements
+* monitoring requirements
+
+Do NOT recommend manually advancing the production slot to current WAL.
+
+Do NOT modify the production slot.
+
+---
+
+# 18. PERFORMANCE ARCHITECTURE
+
+Document WP7 investigation.
+
+Use the actual measured results:
+
+Disposable baseline:
+
+* 20 tables
+* 200 rows/table
+* 6,440 raw WAL rows
+
+Measured:
+
+* PEEK ≈ 0.21 s
+* FOLD ≈ 0.08 s
+* APPLY ≈ 173.66 s
+* ADVANCE ≈ 0.14 s
+
+Therefore APPLY dominates.
+
+Per-table MERGE results:
+
+* first table ≈ 51.8 s warm-up
+* remaining 19 ≈ 6.2 s average
+
+Explain what this suggests.
+
+Include current rough extrapolation:
+
+* ~17 minutes for 117 tables under naive serial assumptions
+* ~58 minutes for 400 tables
+* rough ~14–15 minutes for 400 with MaxParallelTables=4
+
+IMPORTANT:
+
+These are rough extrapolations, NOT validated production performance guarantees.
+
+Explain why realistic performance testing is still required.
+
+Discuss potential future study areas:
+
+* controlled table-level parallelism
+* batching
+* MERGE optimization
+* cluster sizing
+* partitioning
+* schema optimization
+* transaction batching
+* WAL throughput
+* backlog catch-up rate
+
+Do not implement performance changes in the document.
+
+---
+
+# 19. ERROR HANDLING
+
+Document all major failure classes.
+
+At minimum:
+
+* PostgreSQL connection failure
+* slot missing
+* slot conflicting
+* slot lost
+* WAL gap
+* corrupted checkpoint
+* checkpoint persistence failure
+* Delta MERGE failure
+* audit persistence failure
+* slot state persistence failure
+* slot advance failure
+* slot advancement mismatch
+* crash/restart
+* incomplete recovery
+* validation failure
+
+For each:
+
+| Failure | Detection | State | Action | Slot advanced? | Data-loss risk |
+| ------- | --------- | ----- | ------ | -------------- | -------------- |
+
+Do not claim “zero risk” unless demonstrably justified.
+
+---
+
+# 20. IDEMPOTENCY AND DUPLICATE HANDLING
+
+Explain why replay is safe.
+
+Document:
+
+* primary-key based merge
+* LSN/sequence handling
+* update behavior
+* delete behavior
+* duplicate WAL replay
+* crash after APPLY
+* crash after PERSIST
+
+Show why:
+
+```text
+APPLY succeeded
+but
+ADVANCE did not happen
+```
+
+does not necessarily mean data corruption.
+
+Explain the distinction between:
+
+* duplicate processing
+* duplicate target rows
+* repeated MERGE
+* actual data duplication
+
+---
+
+# 21. DATA LOSS SCENARIOS
+
+Create a dedicated threat/failure analysis.
+
+Evaluate at least:
+
+1. WAL retained
+2. WAL gap
+3. slot recreation
+4. corrupted application checkpoint
+5. crash before persistence
+6. crash after persistence
+7. crash after slot advance
+8. multi-table transaction
+9. DDL change
+10. Delta table corruption
+11. recovery interrupted
+12. PostgreSQL storage pressure
+13. CDC consumer downtime
+14. Databricks job overlap
+
+For each explain whether the system:
+
+* safely resumes
+* safely replays
+* enters recovery
+* requires full reload
+* cannot guarantee correctness
+
+---
+
+# 22. CONCURRENCY MODEL
+
+Document:
+
+* one logical replication slot
+* multiple tables
+* Databricks job concurrency requirement
+* Maximum concurrent job runs = 1 as a mandatory deployment configuration
+* table-level parallelism currently not validated at production scale
+
+Explain why overlapping CDC consumers against the same slot/checkpoint state would be dangerous.
+
+---
+
+# 23. SECURITY
+
+Document relevant security considerations without inventing infrastructure.
+
+Discuss:
+
+* PostgreSQL credentials
+* least privilege
+* replication slot permissions
+* Databricks secrets
+* Delta/Unity Catalog permissions
+* network connectivity
+* auditability
+* protection of checkpoint state
+
+If something is not present in the repository, explicitly state:
+
+> Not verified in the current implementation.
+
+---
+
+# 24. OPERATIONAL RUNBOOK
+
+Create a practical operator-oriented section.
+
+Include procedures for:
+
+### Normal CDC startup
+
+### WAL backlog
+
+### WAL gap
+
+### Slot lost
+
+### Slot conflicting
+
+### OUT_OF_SYNC
+
+### RECOVERY_REQUIRED
+
+### RECOVERY_RUNNING after crash
+
+### VALIDATING after crash
+
+### Persistence failure
+
+### Slot advancement failure
+
+### PostgreSQL storage pressure
+
+For each give:
+
+1. symptoms
+2. checks
+3. safe action
+4. unsafe action
+5. expected final state
+
+Explicitly identify actions that MUST NOT be performed manually, especially:
+
+* blindly advancing the production slot
+* dropping/recreating production slot without approved recovery procedure
+* deleting checkpoint state
+* bypassing validation
+* running concurrent CDC jobs
+
+---
+
+# 25. TESTING AND EVIDENCE
+
+Create a detailed validation matrix.
+
+Use the actual test evidence from the reports.
+
+Include:
+
+* unit tests
+* live disposable-slot tests
+* crash simulations
+* persistence failure
+* slot advance
+* SAFE_REPLAY
+* OUT_OF_SYNC
+* WAL_GAP
+* CORRUPT_STATE
+* missing slot
+* conflicting slot
+* lost slot
+* LSN ordering
+* idempotency
+* full recovery with concurrent source writes
+* incomplete recovery
+* validation
+* production slot read-only verification
+
+Known totals:
+
+* Phase 1: 30 unit tests
+* Phase 2 Stages 0–3: 51 unit tests total
+* Phase 2 live tests as documented
+* production slot unchanged
+
+Clearly distinguish:
+
+### Proven
+
+from
+
+### Partially proven
+
+from
+
+### Not proven
+
+---
+
+# 26. ARCHITECTURAL DECISION RECORDS
+
+Create ADR-style summaries for important decisions.
+
+At minimum:
+
+ADR-001: Custom logical decoding instead of Debezium/Kafka
+
+ADR-002: Single replication slot
+
+ADR-003: PEEK instead of consuming before persistence
+
+ADR-004: Application checkpoint before slot advancement
+
+ADR-005: Verified COMMIT LSN as watermark
+
+ADR-006: Full recovery when WAL gap detected
+
+ADR-007: Human-approved slot recovery
+
+ADR-008: Selective table recovery deferred
+
+ADR-009: Slot generation tracking
+
+ADR-010: Recovery state machine
+
+ADR-011: Production slot not manually advanced to current WAL
+
+For each ADR:
+
+* Context
+* Decision
+* Alternatives
+* Reasoning
+* Consequences
+* Current status
+
+---
+
+# 27. LIMITATIONS AND TECHNICAL DEBT
+
+Create a transparent section listing all known limitations.
+
+At minimum include:
+
+1. target-scale 400-table performance unproven
+2. `last_end_lsn` not populated
+3. selective recovery not implemented
+4. independent recovery source not implemented
+5. automatic slot recovery not implemented
+6. WP4 independent detector proof limitation
+7. advisory transition gate
+8. live recovery validation is count/existence based, not checksum based
+9. DDL/schema-change limitations
+10. WAL backlog operational concern
+11. table-level parallelism not validated
+
+Rank each:
+
+* Critical
+* High
+* Medium
+* Low
+
+and explain why.
+
+---
+
+# 28. PRODUCTION READINESS ASSESSMENT
+
+Provide a final architecture assessment.
+
+Use these categories:
+
+* Correctness
+* Recovery safety
+* Data-loss protection
+* Operational readiness
+* Observability
+* Performance
+* Scalability
+* Maintainability
+* Security
+* Testing maturity
+
+For each provide:
+
+* rating out of 10
+* evidence
+* remaining concern
+
+Then provide:
+
+## Overall Architecture Readiness
+
+Clearly state whether the system is:
+
+* READY
+* READY WITH CONDITIONS
+* NOT READY
+
+Do not inflate the rating.
+
+---
+
+# 29. FINAL ARCHITECTURE SUMMARY
+
+End with a concise executive summary answering:
+
+1. What does the system do?
+2. Why is the architecture safe?
+3. What happens during failure?
+4. How does it recover?
+5. What is proven?
+6. What remains unproven?
+7. What should NOT be changed?
+8. What should be studied next?
+9. What are the production risks?
+
+---
+
+# 30. VERY IMPORTANT DOCUMENTATION RULES
+
+Follow these rules strictly:
+
+### Rule 1 — Do not invent
+
+If the repository does not prove something, say:
+
+> Not implemented / not verified.
+
+### Rule 2 — Separate evidence from inference
+
+Use labels such as:
+
+* Implemented
+* Empirically validated
+* Partially validated
+* Investigated
+* Deferred
+* Future consideration
+
+### Rule 3 — Preserve current architecture
+
+Do not redesign the pipeline.
+
+### Rule 4 — No accidental scope expansion
+
+Do not implement or recommend:
+
+* Debezium
+* Kafka
+* triggers
+* external CDC frameworks
+
+unless explicitly presented as rejected alternatives.
+
+### Rule 5 — Do not hide weaknesses
+
+The purpose of this document is to provide an honest architecture baseline.
+
+### Rule 6 — Production slot safety
+
+Do not execute any destructive production operation.
+
+Do not:
+
+* drop the production slot
+* recreate the production slot
+* advance the production slot
+* consume production WAL
+* modify production data
+
+Production verification must remain read-only.
+
+### Rule 7 — Technical precision
+
+Be especially precise about:
+
+* LSN semantics
+* transaction boundaries
+* logical replication slots
+* WAL retention
+* COMMIT LSN
+* replay
+* checkpointing
+* recovery
+* idempotency
+
+### Rule 8 — No unsupported claims
+
+Do not say:
+
+> “Exactly once”
+
+unless the implementation truly guarantees that under the relevant failure model.
+
+Prefer precise language such as:
+
+> “At-least-once processing with idempotent target application and durable checkpoint/slot ordering.”
+
+If that characterization is also not fully justified by the code, explain the exact semantics instead.
+
+---
+
+# 31. EXPECTED OUTPUT FORMAT
+
+Produce one complete Markdown document with this structure:
+
+# PostgreSQL → Databricks CDC
+
+## Architecture and Detailed Design Document
+
+### 1. Executive Summary
+
+### 2. Scope
+
+### 3. Goals and Non-Goals
+
+### 4. System Context
+
+### 5. High-Level Architecture
+
+### 6. Component Architecture
+
+### 7. PostgreSQL WAL and Logical Replication
+
+### 8. Replication Slot Architecture
+
+### 9. Transaction and LSN Semantics
+
+### 10. End-to-End CDC Data Flow
+
+### 11. Checkpoint Architecture
+
+### 12. CDC Safety State Machine
+
+### 13. Recovery State Machine
+
+### 14. Initial Load and Full Recovery
+
+### 15. Idempotency and Replay
+
+### 16. Failure Handling
+
+### 17. Slot Identity / Generation Tracking
+
+### 18. Monitoring and Observability
+
+### 19. Performance and Scalability
+
+### 20. Concurrency Model
+
+### 21. Security
+
+### 22. Operational Runbook
+
+### 23. Testing and Validation Evidence
+
+### 24. Architectural Decision Records
+
+### 25. Deferred Work and Non-Goals
+
+### 26. Limitations and Technical Debt
+
+### 27. Production Readiness Assessment
+
+### 28. Recommended Next Steps
+
+### 29. Final Architecture Summary
+
+### Appendix A — State Definitions
+
+### Appendix B — Control Table Schemas
+
+### Appendix C — Configuration Parameters
+
+### Appendix D — Failure Scenario Matrix
+
+### Appendix E — Test Evidence Matrix
+
+### Appendix F — Mermaid Diagrams
+
+---
+
+# FINAL INSTRUCTION
+
+Do not start writing immediately.
+
+First perform a **deep architectural inspection** of the repository, implementation, tests, and existing reports.
+
+Then internally construct the architecture model.
+
+Then produce the final document.
+
+The final document should be **detailed enough that a senior engineer who has never seen this system can understand how it works, why the safety ordering exists, how recovery works, what is proven, and what remains unresolved.**
+
+Do not merely summarize the Phase 1/Phase 2 reports.
+
+**Reconstruct the architecture from the actual implementation and use the reports as supporting evidence.**
