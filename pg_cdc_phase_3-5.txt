@@ -1,0 +1,850 @@
+# PHASE 3 — STAGE 6
+
+## New-Generation CDC Crash-Safety & Recovery Validation
+
+You are continuing the PostgreSQL → Databricks CDC Phase 3 implementation.
+
+Stage 5 is complete and produced real end-to-end evidence:
+
+* `run_selective_recovery` now executes a real new-generation CDC cycle.
+* It reuses the production `peek_wal_batch`, `run_incremental_load_for_table`, `find_last_commit_lsn`, `consume_wal_upto`, `_classify_advance_result`, and `SlotAdvanceError`.
+* New-slot CDC was proven against a disposable logical replication slot.
+* A table that was never full-loaded was successfully recovered purely through the new slot CDC.
+* The slot genuinely advanced to a verified COMMIT-row LSN.
+* `RECOVERY_COMPLETE` now requires concrete durable state checks.
+* `SelectiveRecoveryEnabled` remains `"false"` by default.
+* The live `if recovery_required:` branch is NOT yet wired to selective recovery.
+* Production readiness remains NO.
+
+Stage 6 must NOT wire the feature flag into production behavior yet.
+
+The sole purpose of this stage is to prove crash safety of the real new-generation CDC cycle.
+
+---
+
+# 1. PRIMARY OBJECTIVE
+
+Build and execute real fault-injection tests around the actual new-generation CDC path:
+
+```
+PEEK
+  ↓
+APPLY
+  ↓
+SELECT VERIFIED COMMIT LSN
+  ↓
+DURABLE PERSIST
+  ↓
+ADVANCE SLOT
+  ↓
+RECOVERY COMPLETE
+```
+
+Specifically prove:
+
+* Crash E1 — after PEEK, before APPLY
+* Crash E2 — after APPLY, before durable watermark persistence
+* Crash E3 — after durable watermark persistence, before slot ADVANCE
+* Crash E4 — after successful slot ADVANCE, before recovery completion
+
+These must be tested against disposable PostgreSQL logical replication slots and disposable/test Delta tables only.
+
+Do NOT touch the production slot.
+
+---
+
+# 2. ABSOLUTE SAFETY INVARIANT
+
+The following invariant remains mandatory:
+
+> If `app_confirmed_lsn = X`, X must be a verified COMMIT-row LSN, and the complete transaction represented by X and all preceding transactions covered by that watermark must already have been durably applied to Delta.
+
+Therefore:
+
+### Forbidden
+
+Never allow:
+
+```
+persist(app_confirmed_lsn = X)
+```
+
+before:
+
+```
+all Delta effects represented by X are durably applied.
+```
+
+Never advance the slot before the corresponding durable application state has been persisted.
+
+Never use:
+
+```
+raw_rows[-1]
+```
+
+as the watermark.
+
+The selected watermark MUST come from a verified `C` row.
+
+---
+
+# 3. FIRST INSPECT THE EXISTING IMPLEMENTATION
+
+Before modifying code:
+
+1. Inspect the actual implementation of:
+
+   * `run_selective_recovery`
+   * `peek_wal_batch`
+   * `run_incremental_load_for_table`
+   * `find_last_commit_lsn`
+   * `consume_wal_upto`
+   * `_classify_advance_result`
+   * `SlotAdvanceError`
+   * `pipeline_slot_state_v4`
+   * `pipeline_checkpoint_v4`
+   * recovery-generation state
+   * existing ordinary CDC loop
+   * existing recovery startup logic
+
+2. Do not create a second CDC implementation.
+
+3. Reuse the production functions wherever possible.
+
+4. Document exactly where the fault-injection hooks are inserted.
+
+The test hooks should be minimal and test-only. Do not permanently contaminate the production execution path with test behavior.
+
+---
+
+# 4. DEFINE THE CRASH POINTS PRECISELY
+
+Implement deterministic fault-injection points.
+
+Use explicit named checkpoints such as:
+
+```
+E1_AFTER_PEEK_BEFORE_APPLY
+E2_AFTER_APPLY_BEFORE_PERSIST
+E3_AFTER_PERSIST_BEFORE_ADVANCE
+E4_AFTER_ADVANCE_BEFORE_COMPLETE
+```
+
+The crash mechanism must actually terminate/interrupt execution sufficiently to simulate process death.
+
+Do NOT merely raise an ordinary recoverable exception unless the test demonstrates that the surrounding process state is equivalent to process termination.
+
+If true process killing is practical in the existing test framework, prefer that.
+
+If not, document the limitation and create the strongest deterministic equivalent possible.
+
+---
+
+# 5. TEST FIXTURE DESIGN
+
+Create a disposable test scenario with:
+
+* old logical replication slot
+* new logical replication slot
+* at least two PostgreSQL tables
+* corresponding Delta test tables
+* one affected table requiring selective full reload
+* one unaffected table that must be recovered through CDC only
+* at least one multi-table transaction
+* known source values before recovery
+* known changes committed after new-slot creation
+
+Use unique test identifiers so cleanup is deterministic.
+
+Never use:
+
+```
+databricks_sync_slot
+```
+
+or any production table.
+
+---
+
+# 6. ESTABLISH A KNOWN RECOVERY BOUNDARY
+
+The test must establish:
+
+```
+OLD SLOT EXISTS
+↓
+NEW SLOT CREATED FIRST
+↓
+OLD SLOT ANALYZED
+↓
+MANIFEST PERSISTED
+↓
+SELECTIVE FULL LOAD
+↓
+NEW SLOT CDC CYCLE
+```
+
+Then inject crashes into the CDC cycle.
+
+Make the source transactions explicit and record:
+
+* transaction contents
+* affected tables
+* expected final PostgreSQL state
+* expected Delta state
+* transaction COMMIT LSN
+* new slot confirmed_flush_lsn
+* new slot restart_lsn
+* application watermark
+
+Capture these values before and after each test.
+
+---
+
+# 7. CRASH E1
+
+## Crash immediately after PEEK, before APPLY
+
+Sequence:
+
+```
+PEEK
+↓
+CRASH
+↓
+PROCESS RESTART
+↓
+PEEK AGAIN
+↓
+APPLY
+↓
+PERSIST
+↓
+ADVANCE
+```
+
+Expected behavior:
+
+* No application watermark may advance because APPLY never completed.
+* `confirmed_flush_lsn` must not incorrectly move because the slot was only peeked.
+* On restart, the same WAL transaction(s) must remain available.
+* The transaction must be applied successfully.
+* Final Delta state must equal PostgreSQL.
+* Slot advancement must occur only after durable persistence.
+* No source transaction may be lost.
+
+Explicitly verify:
+
+```
+app_confirmed_lsn_before_crash
+==
+app_confirmed_lsn_after_restart_before_apply
+```
+
+and that the transaction is still present in the slot.
+
+---
+
+# 8. CRASH E2
+
+## Crash after APPLY but before durable watermark persistence
+
+Sequence:
+
+```
+PEEK
+↓
+APPLY
+↓
+CRASH
+↓
+PROCESS RESTART
+↓
+PEEK
+↓
+REPLAY SAME TRANSACTION
+↓
+PERSIST
+↓
+ADVANCE
+```
+
+This is critical.
+
+Expected behavior:
+
+* Delta may already contain the transaction effects.
+* Durable `app_confirmed_lsn` must NOT claim the transaction was processed before the crash.
+* New slot must still expose the transaction because it was not advanced.
+* Restart must safely replay the transaction.
+* MERGE/upsert/delete behavior must be idempotent.
+* No duplicate logical rows may result.
+* Final Delta state must equal PostgreSQL.
+* Watermark must move only after the successful replay/application and durable persistence.
+
+Verify specifically that:
+
+```
+Delta_before_crash
++
+replay
+=
+correct final Delta state
+```
+
+and not duplicate or corrupted state.
+
+---
+
+# 9. CRASH E3
+
+## Crash after durable persistence but before slot ADVANCE
+
+This is the most important watermark-ordering test.
+
+Sequence:
+
+```
+PEEK
+↓
+APPLY
+↓
+PERSIST app_confirmed_lsn = X
+↓
+CRASH
+↓
+PROCESS RESTART
+↓
+STARTUP RECOVERY
+↓
+NEW SLOT STILL HAS X AVAILABLE
+↓
+REPLAY/RECONCILE SAFELY
+↓
+ADVANCE
+↓
+COMPLETE
+```
+
+Expected behavior:
+
+* Durable `app_confirmed_lsn = X` exists.
+* X must be a verified COMMIT LSN.
+* Delta already contains all effects through X.
+* New slot has NOT yet been advanced.
+* Restart must not interpret the situation as WAL loss.
+* Replay of X must be safe.
+* The slot may then be advanced to X.
+* No transaction may be skipped.
+* No duplicate logical data may remain.
+* Final PostgreSQL and Delta states must match.
+
+Pay special attention to the existing startup rule:
+
+```
+confirmed_flush_lsn < app_confirmed_lsn
+    => NORMAL / safe replay
+```
+
+If this is the exact intended state, prove that the new-generation recovery path handles it correctly.
+
+Do not introduce a new recovery semantic unless absolutely necessary.
+
+---
+
+# 10. CRASH E4
+
+## Crash after successful ADVANCE but before recovery completion
+
+Sequence:
+
+```
+PEEK
+↓
+APPLY
+↓
+PERSIST
+↓
+ADVANCE SUCCESS
+↓
+CRASH
+↓
+PROCESS RESTART
+```
+
+Expected behavior:
+
+* Durable `app_confirmed_lsn` already equals the successfully processed COMMIT watermark.
+* Slot confirmed_flush_lsn is at or beyond that watermark according to the existing validated semantics.
+* The already-processed transaction must NOT be incorrectly re-applied as a new untracked transaction.
+* Recovery should resume/complete idempotently.
+* No data loss.
+* No duplicate data.
+* Old slot must NOT be retired prematurely merely because the process crashed after advance.
+* New generation identity must remain intact.
+
+Verify that restart can distinguish:
+
+```
+CDC processing complete
+but
+RECOVERY_COMPLETE state transition not yet persisted
+```
+
+from an actual incomplete CDC application.
+
+---
+
+# 11. WATERMARK VERIFICATION
+
+For EVERY crash test capture:
+
+### Before crash
+
+* new slot `restart_lsn`
+* new slot `confirmed_flush_lsn`
+* application `app_confirmed_lsn`
+* recovery generation
+* checkpoint state
+* Delta state
+* source PostgreSQL state
+
+### After restart, before recovery
+
+Capture the same values.
+
+### After recovery
+
+Capture the same values.
+
+Produce a compact table:
+
+| Test | Crash Point | app_lsn Before | app_lsn After Restart | Flush Before | Flush After | Final Delta = PG | Result |
+| ---- | ----------- | -------------- | --------------------- | ------------ | ----------- | ---------------- | ------ |
+
+Do not mark PASS merely because the process eventually finishes.
+
+PASS requires all safety invariants to hold.
+
+---
+
+# 12. VERIFY COMMIT WATERMARK SAFETY
+
+For every successful CDC cycle:
+
+1. Identify the selected watermark.
+2. Retrieve/inspect the corresponding wal2json record.
+3. Prove its kind/type is COMMIT.
+4. Verify the selected LSN is exactly the expected transaction COMMIT boundary.
+5. Verify no transaction after that watermark was incorrectly marked processed.
+6. Verify `consume_wal_upto()` receives that verified watermark.
+7. Verify durable state is persisted before the advance call.
+
+Add assertions where practical.
+
+---
+
+# 13. MULTI-TABLE TRANSACTION CRASH TEST
+
+At least one E2 test must contain a transaction such as:
+
+```
+BEGIN;
+UPDATE table_A;
+UPDATE table_B;
+INSERT table_B;
+COMMIT;
+```
+
+Then inject a crash during the CDC cycle.
+
+The important requirement is:
+
+> The application watermark must not advance unless every table effect belonging to the transaction has been successfully applied.
+
+Do not allow:
+
+```
+table_A applied
+table_B failed
+watermark advanced
+```
+
+That would violate the invariant.
+
+Test at least one crash scenario where multiple tables participate in the same transaction.
+
+---
+
+# 14. TABLE-BY-TABLE APPLY RISK
+
+Stage 5 currently applies through:
+
+```
+run_incremental_load_for_table
+```
+
+per active table.
+
+Inspect carefully whether this can cause partial application of a multi-table transaction.
+
+Determine:
+
+* how the WAL batch is grouped
+* how transactions are represented
+* how table-level application is ordered
+* when the watermark is selected
+* whether a failure on one table can occur after another table was already applied
+* whether replay is safe
+* whether checkpoint persistence happens only after the complete transaction set is applied
+
+If transaction atomicity is not guaranteed at the Delta layer, document that clearly.
+
+Do NOT claim database-style atomicity across multiple Delta tables if the implementation does not provide it.
+
+The required property is at minimum:
+
+```
+watermark advancement only after all required effects are durably applied
+```
+
+and restart must safely reconcile partial application.
+
+---
+
+# 15. FIRST NEW-SLOT CYCLE
+
+Also explicitly test the first CDC cycle after new-slot creation.
+
+Verify:
+
+* initial slot state
+* initial `app_confirmed_lsn`
+* first PEEK
+* first transaction
+* first COMMIT watermark
+* first durable state write
+* first ADVANCE
+* resulting slot state
+
+Do not assume that new-slot creation semantics are safe merely because the slot exists.
+
+Prove that the first cycle cannot skip transactions.
+
+---
+
+# 16. NO-CHANGE CYCLE
+
+Test a new-generation CDC cycle where:
+
+```
+PEEK returns no changes
+```
+
+Verify:
+
+* no false watermark is generated
+* no invalid LSN is persisted
+* no slot advance is performed unnecessarily
+* recovery state remains internally consistent
+* the cycle can subsequently process a real transaction
+
+---
+
+# 17. CRASH RECOVERY MUST BE IDEMPOTENT
+
+For E2/E3 especially, execute enough of the test to prove:
+
+```
+crash
+→
+restart
+→
+replay
+→
+persist
+→
+advance
+```
+
+is safe.
+
+If possible, repeat the same crash scenario more than once.
+
+For example:
+
+```
+crash E2
+restart
+crash E2 again
+restart
+successful cycle
+```
+
+The final result must still converge to:
+
+```
+Delta == PostgreSQL
+```
+
+Do not require this if it becomes prohibitively expensive, but document whether repeated-crash resilience was tested.
+
+---
+
+# 18. RETIREMENT MUST NOT OCCUR AFTER AN INCOMPLETE CRASH
+
+For E1–E4 verify:
+
+* old slot remains available while recovery is incomplete
+* new generation remains identifiable
+* restart does not accidentally retire the old slot
+* retirement only occurs after the existing validation gate is satisfied
+
+Especially test:
+
+```
+E4 crash
+→
+restart
+→
+recovery completion
+→
+only then old-slot retirement
+```
+
+If current orchestration already guarantees this, prove it rather than rewriting it.
+
+---
+
+# 19. DO NOT CHANGE THE FOLLOWING
+
+Preserve:
+
+* `SelectiveRecoveryEnabled = "false"` default
+* existing production recovery behavior
+* existing Phase 1 watermark semantics
+* existing Phase 2 recovery state machine
+* existing ordinary CDC behavior
+* existing `peek_wal_batch` compatibility
+* existing `consume_wal_upto` compatibility
+* existing `_classify_advance_result`
+* existing `SlotAdvanceError`
+* production slot untouched
+* production tables untouched
+
+Do not wire selective recovery into:
+
+```
+if recovery_required:
+```
+
+during Stage 6.
+
+Do not perform production migrations.
+
+---
+
+# 20. FAILURE POLICY
+
+If any crash test exposes a violation:
+
+STOP and fix the underlying implementation before proceeding.
+
+Examples of failures requiring implementation correction:
+
+* watermark persisted before Delta application
+* slot advanced before durable watermark
+* source transaction disappears after crash
+* replay creates incorrect duplicates
+* replay fails to converge
+* multi-table transaction partially applied and watermark advances
+* restart incorrectly declares recovery complete
+* old slot retired prematurely
+* new generation identity lost
+* invalid/non-COMMIT watermark persisted
+
+Do not weaken the test to make it pass.
+
+Do not classify a structural argument as equivalent to a live crash test.
+
+---
+
+# 21. TEST ARTIFACTS
+
+Add dedicated tests, for example:
+
+```
+tests/test_recovery_crash_safety.py
+```
+
+and disposable live experiments under the existing Phase 3 experiment structure.
+
+Keep fault injection isolated and clearly documented.
+
+The test output must distinguish:
+
+```
+LIVE PASS
+LIVE FAIL
+UNIT PASS
+NOT TESTED
+```
+
+Do not report a test as PASS merely because an analogous test existed in Stage 3/4.
+
+---
+
+# 22. REGRESSION TESTS
+
+After implementing Stage 6:
+
+Run:
+
+1. all existing unit tests
+2. all existing recovery tests
+3. all Phase 3 tests
+4. new crash-safety tests
+5. disposable live PostgreSQL tests
+6. any existing slot identity/generation tests
+
+Report exact counts.
+
+The existing 76/76 result is a baseline, not a substitute for rerunning regression.
+
+---
+
+# 23. FINAL REPORT FORMAT
+
+Return a Stage 6 report containing:
+
+## A. Implementation
+
+Exactly what code changed.
+
+## B. Fault-injection mechanism
+
+Exactly how process interruption was simulated.
+
+## C. Crash matrix
+
+| Test | Crash Point   | Live/Unit | Result |
+| ---- | ------------- | --------- | ------ |
+| E1   | after PEEK    | ...       | ...    |
+| E2   | after APPLY   | ...       | ...    |
+| E3   | after PERSIST | ...       | ...    |
+| E4   | after ADVANCE | ...       | ...    |
+
+## D. Watermark evidence
+
+Show actual captured LSNs.
+
+## E. Multi-table transaction evidence
+
+Show source and Delta final-state comparison.
+
+## F. Idempotency evidence
+
+Show replay behavior after E2/E3.
+
+## G. Retirement safety
+
+Show that old-slot retirement cannot happen prematurely.
+
+## H. Regression
+
+Exact test counts.
+
+## I. Remaining limitations
+
+Be explicit.
+
+## J. Production readiness
+
+Must remain:
+
+```
+PRODUCTION READY: NO
+```
+
+unless I explicitly authorize a later production-readiness stage.
+
+## K. Feature flag
+
+Must remain:
+
+```
+SelectiveRecoveryEnabled = false
+```
+
+and live recovery branch must remain unchanged.
+
+---
+
+# 24. FINAL ACCEPTANCE CRITERIA
+
+Stage 6 is successful only if the evidence demonstrates:
+
+### E1
+
+PEEK-only crash does not lose or advance data.
+
+### E2
+
+APPLY-before-persist crash safely replays without incorrect duplication.
+
+### E3
+
+PERSIST-before-advance crash safely reconciles durable application state with an unadvanced slot.
+
+### E4
+
+ADVANCE-before-completion crash resumes without losing or incorrectly duplicating data.
+
+### Multi-table transaction
+
+All effects are applied before the watermark advances.
+
+### COMMIT invariant
+
+Every persisted application watermark is a verified COMMIT-row LSN.
+
+### Ordering invariant
+
+The implementation remains:
+
+```
+PEEK
+  →
+APPLY
+  →
+VERIFIED COMMIT LSN
+  →
+DURABLE PERSIST
+  →
+ADVANCE
+```
+
+### Recovery invariant
+
+No committed source transaction may exist in neither:
+
+```
+old-slot recovery analysis
+```
+
+nor:
+
+```
+new-slot CDC
+```
+
+### Operational invariant
+
+The old slot is not retired until the new generation is durably validated.
+
+If any of these cannot be proven, report the exact gap instead of declaring Stage 6 complete.
+
+Do not wire the feature flag yet.
+Do not declare production readiness.
+Do not touch the production slot.
