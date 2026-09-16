@@ -1,0 +1,1063 @@
+# Claude Code — Phase 3 Stage 4
+
+## Implement Safe Selective Recovery Orchestrator
+
+We are now proceeding from Phase 3 Stage 3 into the actual WP1 selective-recovery implementation.
+
+Phase 1, Phase 2, Stage 1, Stage 2, and Stage 3 have established the recovery safety model experimentally.
+
+The implementation must preserve that model exactly.
+
+---
+
+# 1. AUTHORITATIVE RECOVERY ORDERING
+
+The following ordering is now an architectural invariant.
+
+It was experimentally validated in Stage 3, including the critical E1b failure.
+
+The recovery sequence MUST be:
+
+```text
+1. CREATE NEW SLOT
+2. ANALYZE OLD SLOT using non-destructive PEEK
+3. Persist affected-table recovery manifest
+4. SELECTIVELY FULL LOAD ONLY affected tables
+5. Start consuming NEW SLOT
+6. Successfully complete and durably persist one incremental CDC cycle
+7. Validate recovery
+8. ONLY THEN retire OLD SLOT
+```
+
+Do not change this ordering.
+
+In particular:
+
+```text
+OLD SLOT ANALYSIS
+        ↓
+NEW SLOT CREATION
+```
+
+is FORBIDDEN.
+
+This ordering was experimentally proven unsafe.
+
+Also forbidden:
+
+```text
+FULL LOAD
+        ↓
+NEW SLOT CREATION
+```
+
+This was experimentally proven unsafe in Stage 2 Experiment A.
+
+The new slot must exist before ANY recovery analysis begins.
+
+---
+
+# 2. SAFETY PRINCIPLE
+
+After the new slot has been created, every subsequent committed data change belongs to the new generation's CDC stream.
+
+Therefore:
+
+```text
+Before NEW SLOT creation
+    ↓
+old-slot WAL analysis
+    ↓
+affected tables
+    ↓
+selective full load
+
+At/after NEW SLOT creation
+    ↓
+NEW SLOT CDC
+```
+
+The implementation must preserve this partition.
+
+Do not introduce any operation that creates an unowned time interval between these regions.
+
+---
+
+# 3. IMPORTANT: DO NOT TOUCH PRODUCTION YET
+
+Implement the code in a way that can be exercised entirely against disposable objects first.
+
+Do NOT automatically operate on:
+
+```text
+databricks_sync_slot
+```
+
+during development/testing.
+
+Do not drop or advance the production slot.
+
+Do not modify production control-state rows during test execution.
+
+Use:
+
+* disposable slots
+* disposable schemas/tables
+* test recovery IDs
+* test generations
+* test control-table copies where appropriate
+
+until all execution crash tests pass.
+
+---
+
+# 4. INSPECT BEFORE MODIFYING
+
+Before coding, inspect:
+
+```text
+Postgre_DataIngestion_V4.py
+
+pipeline_slot_state_v4
+pipeline_checkpoint_v4
+pipeline_recovery_manifest_v4
+CDC_STATE_TRANSITIONS
+existing SNAPSHOT recovery implementation
+existing slot-generation implementation
+existing full-load/JDBC implementation
+existing CDC PEEK/APPLY/ADVANCE flow
+existing checkpoint persistence
+existing retry/restart behavior
+```
+
+Also inspect all Stage 1–3 tests.
+
+Do not duplicate existing logic.
+
+Reuse existing:
+
+* state management
+* slot identity/generation logic
+* checkpoint semantics
+* CDC processing
+* Delta MERGE logic
+* logging/monitoring
+* configuration patterns
+
+where appropriate.
+
+---
+
+# 5. IMPLEMENTATION SCOPE
+
+Implement the following components.
+
+## Component A — Recovery Orchestrator
+
+Create a single authoritative orchestration path for selective recovery.
+
+Conceptually:
+
+```text
+RECOVERY_REQUIRED
+        ↓
+CREATE_NEW_GENERATION
+        ↓
+ANALYZE_OLD_SLOT
+        ↓
+PERSIST_MANIFEST
+        ↓
+SELECTIVE_RELOAD
+        ↓
+START_NEW_CDC
+        ↓
+VALIDATE_NEW_GENERATION
+        ↓
+RETIRE_OLD_SLOT
+        ↓
+NORMAL
+```
+
+Use existing states wherever they already represent the required semantics.
+
+Do not create unnecessary states.
+
+---
+
+# 6. NEW SLOT CREATION MUST BE FIRST
+
+The first mutating recovery operation must be new-generation/new-slot creation.
+
+Conceptually:
+
+```python
+new_slot = ensure_new_generation_exists(...)
+```
+
+Only after successful durable confirmation that the new slot exists may the code invoke:
+
+```python
+analyze_old_slot(...)
+```
+
+This must be enforced structurally.
+
+Do not merely rely on comments.
+
+The code should make the invalid ordering difficult or impossible.
+
+---
+
+# 7. NEW SLOT CREATION IDEMPOTENCY
+
+Recovery can crash immediately after slot creation.
+
+Therefore:
+
+```text
+attempt 1:
+    CREATE NEW SLOT
+    crash
+
+attempt 2:
+    resume
+```
+
+must NOT create:
+
+```text
+new_slot_2
+```
+
+instead of resuming:
+
+```text
+new_slot_1
+```
+
+Use the existing generation identity mechanisms where possible.
+
+Persist enough durable state to identify:
+
+* recovery_id
+* old generation
+* new generation
+* old slot
+* new slot
+* creation status
+
+A partially-created generation must be resumable or explicitly invalidated.
+
+Never silently create orphan slots.
+
+---
+
+# 8. OLD-SLOT ANALYSIS
+
+After the new slot exists:
+
+```text
+old slot
+    ↓
+pg_logical_slot_peek_changes(...)
+    ↓
+wal2json parser
+    ↓
+affected tables
+```
+
+The analysis must remain:
+
+* non-destructive;
+* read-only with respect to the old slot;
+* transaction-aware;
+* multi-table aware;
+* retry-safe.
+
+Do NOT advance the old slot during analysis.
+
+Do NOT consume old-slot changes.
+
+Do NOT alter:
+
+* restart_lsn
+* confirmed_flush_lsn
+
+as a side effect of analysis.
+
+---
+
+# 9. MANIFEST
+
+Persist:
+
+```text
+pipeline_recovery_manifest_v4
+```
+
+using the Stage 2 MERGE/idempotency fix.
+
+The manifest must be durable before selective reload begins.
+
+At minimum preserve the existing meaningful fields for:
+
+* recovery_id
+* schema
+* table
+* affected/recovery LSN information
+* generation
+* status
+* timestamps/reason
+
+Do not add fields unless their semantics are clearly defined.
+
+Manifest retry must remain idempotent.
+
+---
+
+# 10. SELECTIVE FULL LOAD
+
+Only tables present in the recovery manifest should be fully loaded.
+
+Example:
+
+```text
+Affected:
+    A
+    C
+
+Unaffected:
+    B
+    D
+    E
+```
+
+Then:
+
+```text
+FULL LOAD:
+    A
+    C
+
+NO FULL LOAD:
+    B
+    D
+    E
+```
+
+Tables not in the manifest must continue through the new slot's CDC stream.
+
+This behavior was experimentally validated in Stage 3.
+
+Do not accidentally retain the existing "reload all active tables" behavior when selective recovery is explicitly active.
+
+---
+
+# 11. ACTUAL SPARK JDBC PATH
+
+Use the existing production full-load mechanism:
+
+```python
+spark.read.format("postgresql")
+```
+
+Do not replace it with a separate psycopg2-based data-loading implementation unless absolutely required.
+
+Stage 3 verified that the current production path:
+
+* uses one partition in the tested configuration;
+* uses one JDBC connection;
+* executes one SQL statement for the tested table-load path;
+* receives PostgreSQL statement-level MVCC visibility.
+
+Preserve this behavior.
+
+Before implementing, verify that the code path being called during recovery is exactly the path tested in Stage 3.
+
+If there are code paths that use:
+
+* `partitionColumn`
+* `numPartitions`
+* bounds
+* multiple JDBC queries
+* retry-based partial reads
+
+ensure their semantics are understood.
+
+Do not silently assume all full-load paths have the same snapshot behavior.
+
+---
+
+# 12. FULL LOAD + NEW CDC SEMANTICS
+
+For an affected table:
+
+```text
+NEW SLOT CREATED
+        ↓
+SELECTIVE FULL LOAD
+        ↓
+NEW CDC
+```
+
+A change after new-slot creation may appear both:
+
+* in the full-load snapshot if it committed before the SELECT statement's snapshot;
+* and in the new slot.
+
+This is acceptable because the CDC processing must be idempotent and must converge to the final PostgreSQL state.
+
+Do not assume "exactly once" at the source/read boundary.
+
+The required invariant is:
+
+> final Delta state must converge to the final PostgreSQL state without a lost change.
+
+Use the existing Delta MERGE semantics.
+
+---
+
+# 13. UNaffected TABLES
+
+For a table NOT in the manifest:
+
+```text
+NO FULL LOAD
+        ↓
+NEW SLOT CDC
+```
+
+must be sufficient.
+
+Do not initialize an unaffected table from a new snapshot unless there is a specific reason.
+
+This is the core benefit of selective recovery.
+
+Add a regression test proving:
+
+```text
+table B absent from manifest
+B changes after new slot creation
+B receives no full load
+B converges through CDC
+```
+
+---
+
+# 14. MULTI-TABLE TRANSACTIONS
+
+If an old-slot transaction modifies:
+
+```text
+A + B + C
+```
+
+then all three tables must be in the recovery manifest.
+
+Do not allow partial transaction membership.
+
+For a transaction after new-slot creation:
+
+```text
+A + B + C
+```
+
+the new slot must capture the transaction and CDC must apply it correctly.
+
+Preserve transaction ordering.
+
+---
+
+# 15. LSN WATERMARK SAFETY
+
+Preserve the existing invariant:
+
+```text
+app_confirmed_lsn
+```
+
+must only represent a COMMIT (`C`) row LSN.
+
+When consuming the new slot:
+
+```text
+PEEK
+    ↓
+APPLY complete transactions
+    ↓
+last C row
+    ↓
+persist checkpoint/state
+    ↓
+ADVANCE
+```
+
+Never:
+
+```python
+raw_rows[-1]
+```
+
+without verifying the row type.
+
+Do not advance to a partial transaction boundary.
+
+---
+
+# 16. NEW GENERATION STARTING POINT
+
+Do not invent a new LSN interpretation.
+
+Use the PostgreSQL slot's actual semantics established in Phase 1–3.
+
+Capture and log:
+
+```text
+new_slot.restart_lsn
+new_slot.confirmed_flush_lsn
+```
+
+at creation.
+
+Clearly document:
+
+* what point the new slot guarantees coverage from;
+* what changes belong to the new generation;
+* how the existing application watermark is initialized;
+* how first CDC processing works for the new generation.
+
+If the existing slot bootstrap semantics are insufficient for rollover, STOP and fix the design before proceeding.
+
+---
+
+# 17. RECOVERY STATE MACHINE
+
+Integrate the selective-recovery states into the existing state machine.
+
+Do not create an independent state system.
+
+Potential states:
+
+```text
+RECOVERY_REQUIRED
+RECOVERY_PREPARING
+NEW_GENERATION_CREATED
+RECOVERY_ANALYZING
+RECOVERY_MANIFEST_READY
+RECOVERY_LOADING
+RECOVERY_CDC_VALIDATING
+RECOVERY_COMPLETE
+OLD_GENERATION_RETIRE_PENDING
+NORMAL
+```
+
+These names are illustrative.
+
+Use existing states where appropriate.
+
+For every state define:
+
+* durable representation;
+* entry condition;
+* allowed transitions;
+* retry behavior;
+* crash recovery behavior;
+* operator-visible reason.
+
+---
+
+# 18. CRASH RECOVERY IS MANDATORY
+
+Now that execution code exists, implement the crash tests.
+
+Use disposable objects.
+
+Test crashes at:
+
+### Crash A
+
+Immediately after new slot creation.
+
+Expected:
+
+* restart finds existing new generation;
+* no duplicate slot;
+* old slot still exists;
+* recovery resumes safely.
+
+### Crash B
+
+After manifest persistence.
+
+Expected:
+
+* manifest remains durable;
+* retry does not duplicate rows;
+* recovery continues.
+
+### Crash C
+
+Halfway through selective full load.
+
+Expected:
+
+* retry is safe;
+* partial Delta state does not produce corruption;
+* full load/merge is idempotent;
+* CDC eventually converges.
+
+### Crash D
+
+After full load but before CDC starts.
+
+Expected:
+
+* new slot remains;
+* manifest remains;
+* recovery resumes;
+* no second new generation is created.
+
+### Crash E
+
+During first new-generation CDC cycle.
+
+Expected:
+
+* checkpoint/app_confirmed_lsn remains safe;
+* retry replays safely if necessary;
+* no committed transaction is skipped.
+
+### Crash F
+
+After successful new CDC cycle but before old-slot retirement.
+
+Expected:
+
+* restart sees validation already completed;
+* old slot remains;
+* system can safely complete retirement;
+* no second recovery occurs.
+
+---
+
+# 19. OLD SLOT RETIREMENT GATE
+
+The old slot must NOT be retired merely because:
+
+```text
+new slot exists
+```
+
+Retirement requires all of:
+
+```text
+new slot exists
+AND
+affected-table manifest persisted
+AND
+all required selective loads succeeded
+AND
+new CDC started successfully
+AND
+at least one complete incremental CDC cycle succeeded
+AND
+new app_confirmed_lsn/state persisted safely
+AND
+validation passed
+```
+
+Only then:
+
+```text
+OLD SLOT → RETIRED
+```
+
+If any condition fails:
+
+```text
+OLD SLOT REMAINS
+```
+
+Recovery remains resumable.
+
+---
+
+# 20. OLD SLOT RETIREMENT MUST BE IDEMPOTENT
+
+Test:
+
+```text
+retirement attempted
+crash
+restart
+```
+
+The system must safely handle:
+
+* old slot already dropped;
+* old slot still exists;
+* retirement partially completed;
+* state says retirement pending.
+
+Do not treat:
+
+```text
+slot does not exist
+```
+
+as automatically equivalent to successful retirement unless generation/state metadata proves that this is the expected old slot.
+
+Never accidentally drop the new slot.
+
+---
+
+# 21. DDL SAFETY — DO NOT INVENT A FALSE SIGNAL
+
+This is important.
+
+Stage 3 established that the current wal2json analysis does NOT provide sufficient evidence to reliably identify an `ALTER TABLE` occurring during the discarded period.
+
+Therefore:
+
+> Selective recovery must not be used when DDL during the recovery interval cannot be reliably ruled out.
+
+Do NOT claim that:
+
+```text
+pg_stat_user_tables
+```
+
+is a reliable historical DDL detector unless you can demonstrate that with authoritative PostgreSQL semantics and live tests.
+
+Do not use an indirect metadata field as though it were exact DDL history.
+
+A configurable recovery policy such as:
+
+```text
+if recovery_interval > configured_safe_window:
+    selective recovery prohibited
+```
+
+may be implemented as an operational conservative guard, but it is NOT DDL detection.
+
+Clearly label it as a policy guard.
+
+If no reliable DDL-absence mechanism exists, the safest implementation is:
+
+```text
+DDL status unknown
+        ↓
+SELECTIVE RECOVERY NOT PERMITTED
+        ↓
+FULL RELOAD ALL
+```
+
+This must be explicit.
+
+---
+
+# 22. WAL GAP HANDLING
+
+If:
+
+```text
+app_confirmed_lsn < old_slot.restart_lsn
+```
+
+then:
+
+```text
+WAL_GAP_DETECTED
+        ↓
+RECOVERY_REQUIRED
+        ↓
+SAFE FALLBACK
+```
+
+If the old slot is already gone:
+
+```text
+full-reload-all
+```
+
+remains the safe fallback.
+
+Do NOT claim selective recovery is possible after the source WAL has already been discarded.
+
+---
+
+# 23. WAL PRESSURE
+
+Be careful about this sequence:
+
+```text
+OLD SLOT CRITICAL
+        ↓
+CREATE NEW SLOT
+```
+
+Creating another slot can temporarily increase retention.
+
+Document exactly when the old slot can be dropped and when its retained WAL becomes releasable.
+
+The implementation should minimize the time both slots coexist while still preserving the retirement safety gate.
+
+Do not prematurely drop the old slot merely to reduce WAL usage.
+
+---
+
+# 24. ANALYSIS OF LARGE BACKLOGS
+
+The recovery analyzer may inspect a very large WAL interval.
+
+Ensure:
+
+* transaction boundaries are preserved;
+* large transactions are not truncated;
+* repeated PEEK processing does not accidentally advance the slot;
+* parser state is preserved across batches;
+* incomplete trailing transactions are handled correctly;
+* analysis can resume safely after failure.
+
+If the current implementation cannot safely process a large backlog, fail closed rather than pretending the manifest is complete.
+
+---
+
+# 25. FINAL RECOVERY VALIDATION
+
+Before old-slot retirement, perform a validation appropriate to the existing system.
+
+At minimum validate:
+
+* new generation identity;
+* new slot existence;
+* expected recovery manifest completion;
+* new CDC cycle completion;
+* persisted new app_confirmed_lsn;
+* no state/checkpoint contradiction;
+* affected tables have completed recovery;
+* CDC has started from the new generation.
+
+Where practical, compare recovered table state against PostgreSQL for the disposable integration tests.
+
+Do not introduce an expensive production-wide table comparison unless already supported by the project.
+
+---
+
+# 26. TEST MATRIX
+
+Create automated/disposable tests covering:
+
+## Basic
+
+1. One affected table.
+2. Multiple affected tables.
+3. No affected tables.
+4. Repeated changes to same table.
+5. INSERT.
+6. UPDATE.
+7. DELETE.
+8. Multi-table transaction.
+
+## Boundary
+
+9. Change before new slot creation.
+10. Change immediately after new slot creation.
+11. Change during old-slot analysis.
+12. Change during selective full load.
+13. Change immediately before new CDC.
+14. Change after CDC starts.
+
+## Unaffected tables
+
+15. Unaffected table changes after new slot creation.
+16. Unaffected table participates in a post-slot multi-table transaction.
+
+## Concurrency
+
+17. Multiple concurrent writers.
+18. Overlapping multi-table writers.
+
+## Failure
+
+19. Crash after new slot creation.
+20. Crash after manifest.
+21. Crash during full load.
+22. Crash before CDC.
+23. Crash during CDC.
+24. Crash before old-slot retirement.
+25. Restart after old-slot retirement.
+
+## Safety
+
+26. DDL uncertainty.
+27. Missing old slot.
+28. WAL gap.
+29. Corrupt manifest.
+30. Conflicting generation.
+31. New slot creation failure.
+32. Selective load failure.
+33. CDC validation failure.
+
+All tests must remain disposable.
+
+---
+
+# 27. REGRESSION
+
+Run the complete existing test suite.
+
+The following must remain intact:
+
+```text
+Phase 1 tests
+Phase 2 tests
+Stage 1 tests
+Stage 2 tests
+Stage 3 tests
+```
+
+The Stage 2 manifest MERGE fix must remain.
+
+Report exact counts.
+
+---
+
+# 28. DO NOT HIDE LIMITATIONS
+
+At the end, produce a clear matrix:
+
+| Capability               | Status    | Evidence         |
+| ------------------------ | --------- | ---------------- |
+| Safe boundary ordering   | PASS      | Stage 3 E1b/E234 |
+| New slot creation        | PASS/FAIL | execution tests  |
+| Old-slot analysis        | PASS/FAIL | tests            |
+| Manifest                 | PASS/FAIL | tests            |
+| Selective reload         | PASS/FAIL | tests            |
+| Unaffected-table CDC     | PASS/FAIL | tests            |
+| Multi-table transactions | PASS/FAIL | tests            |
+| Crash recovery           | PASS/FAIL | tests            |
+| Old-slot retirement      | PASS/FAIL | tests            |
+| DDL guard                | PASS/FAIL | exact mechanism  |
+| WAL-gap fallback         | PASS/FAIL | tests            |
+| Multi-writer safety      | PASS/FAIL | tests            |
+| Production readiness     | YES/NO    | evidence         |
+
+Do not mark anything PASS without a concrete test or existing verified evidence.
+
+---
+
+# 29. PRODUCTION SAFETY GATE
+
+Even after implementation and tests pass:
+
+DO NOT automatically switch the production slot to selective recovery.
+
+The implementation must initially have a safe feature gate such as:
+
+```text
+selective_recovery_enabled = false
+```
+
+or equivalent.
+
+When disabled:
+
+```text
+RECOVERY_REQUIRED
+        ↓
+existing safe full-reload-all path
+```
+
+When enabled:
+
+```text
+RECOVERY_REQUIRED
+        ↓
+selective recovery
+```
+
+The feature flag must default to the existing safe behavior.
+
+Do not change the production default silently.
+
+---
+
+# 30. FINAL DELIVERABLE
+
+Produce:
+
+1. Implementation changes.
+2. State-machine changes.
+3. Recovery manifest changes.
+4. Slot-generation lifecycle changes.
+5. Crash tests A–F.
+6. Boundary/concurrency tests.
+7. DDL safety guard implementation.
+8. Complete regression results.
+9. Detailed Stage 4 implementation report.
+10. Exact production rollout prerequisites.
+
+The final report must explicitly answer:
+
+```text
+WP1 IMPLEMENTED: YES / NO
+
+SELECTIVE RECOVERY ENABLED BY DEFAULT: YES / NO
+
+PRODUCTION READY: YES / NO
+```
+
+If any critical safety test fails:
+
+```text
+STOP
+```
+
+Do not weaken the invariant to make the test pass.
+
+Report:
+
+* exact failure;
+* exact data-loss/corruption risk;
+* affected component;
+* safest fallback;
+* required design change.
+
+---
+
+# 31. ABSOLUTE SAFETY RULE
+
+The implementation must never create a situation where a committed PostgreSQL change can exist in:
+
+```text
+neither old-slot recovery analysis
+nor new-slot CDC
+```
+
+The architectural invariant is:
+
+```text
+                  NEW SLOT CREATION
+                         │
+            ┌────────────┴────────────┐
+            │                         │
+      BEFORE THIS POINT          AT/AFTER THIS POINT
+            │                         │
+       OLD SLOT WAL               NEW SLOT WAL
+       ANALYSIS                   CDC
+            │                         │
+       affected tables                 │
+            │                         │
+       selective load                  │
+            └────────────┬────────────┘
+                         │
+                    final state
+                         │
+                         ▼
+                  retire old slot
+```
+
+This is the central correctness property.
+
+Do not compromise it for performance, simplicity, or operational convenience.
