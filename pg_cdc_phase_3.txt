@@ -1,0 +1,1421 @@
+# PostgreSQL → Databricks CDC — Phase 3 Implementation Prompt
+
+## Role
+
+Act as a senior PostgreSQL logical replication + Databricks CDC architect and implementation engineer.
+
+You are continuing an existing PostgreSQL → Databricks CDC project.
+
+**Do not redesign the entire pipeline from scratch.**
+
+First inspect the existing repository and the completed Phase 1/Phase 2 implementation. Reuse existing abstractions, state tables, recovery state machine, slot-generation logic, monitoring, checkpoint semantics, and test infrastructure wherever possible.
+
+The objective of Phase 3 is to implement and experimentally validate:
+
+1. **WP1 — Selective Recovery**
+2. **WP2 — Independent Recovery Source**
+3. Safe **CDC slot/generation rollover**
+4. A WAL-pressure recovery workflow that can identify affected tables before discarding old WAL
+5. Selective full reload of only affected tables
+6. Safe transition to a new logical replication slot/generation
+7. Crash-safe and auditable recovery
+
+---
+
+# 1. Existing Phase 2 baseline
+
+The existing Phase 2 implementation has already implemented:
+
+* Phase 1 defect fixes
+* WP6 — Monitoring / Observability
+* WP4 — Slot Identity / Generation Tracking
+* WP3 — Formal Recovery State Machine
+
+Do not remove or weaken those capabilities.
+
+The existing recovery semantics include concepts such as:
+
+```text
+FIRST_RUN
+NORMAL
+OUT_OF_SYNC
+RECOVERY_REQUIRED
+WAL_GAP_DETECTED
+CORRUPT_STATE
+FAILED
+```
+
+The existing durable state includes the application's confirmed LSN, slot identity/generation information, and checkpoint information.
+
+The current production slot is conceptually:
+
+```text
+databricks_sync_slot
+```
+
+Do not touch or modify the real production slot during development/testing unless explicitly required and explicitly approved.
+
+Existing experiments used disposable slots such as:
+
+```text
+wd_lsn_probe2
+```
+
+Continue using disposable test slots for experiments.
+
+---
+
+# 2. Critical existing safety invariant
+
+Preserve this invariant exactly:
+
+> If `app_confirmed_lsn = X`, then X must be the LSN of a COMMIT (`C`) row, and the corresponding transaction and all prior transactions represented by that watermark must have been durably applied to Delta.
+
+The implementation must continue to enforce:
+
+```text
+selected watermark LSN == COMMIT row LSN
+```
+
+Do NOT revert to:
+
+```python
+new_watermark = raw_rows[-1]
+```
+
+unless the code has already proven that the final row is a COMMIT row.
+
+The normal CDC processing model remains:
+
+```text
+PEEK
+  ↓
+decode
+  ↓
+group/fold complete transactions
+  ↓
+APPLY to Delta
+  ↓
+identify last successful COMMIT LSN
+  ↓
+persist checkpoint/state
+  ↓
+ADVANCE/GET changes only after successful persistence
+```
+
+Do not weaken this invariant while implementing Phase 3.
+
+---
+
+# 3. Phase 3 problem statement
+
+The current fallback for a WAL gap is effectively:
+
+```text
+app_confirmed_lsn < restart_lsn
+        ↓
+WAL_GAP_DETECTED
+        ↓
+RECOVERY_REQUIRED
+        ↓
+full reload all active tables
+```
+
+This is safe but potentially very expensive.
+
+We want to investigate and implement a more selective recovery mechanism:
+
+```text
+WAL pressure / impending WAL loss
+        ↓
+inspect unconsumed WAL using PEEK
+        ↓
+identify tables affected since the application's last safe point
+        ↓
+establish a safe recovery boundary
+        ↓
+selectively reload only affected tables
+        ↓
+create/use new CDC generation
+        ↓
+resume CDC
+        ↓
+verify
+        ↓
+retire old slot
+```
+
+Example:
+
+```text
+Active tables:
+A B C D E F
+
+WAL backlog contains changes to:
+
+A
+C
+F
+
+Recovery should ideally perform:
+
+FULL LOAD:
+A
+C
+F
+
+No full reload:
+B
+D
+E
+```
+
+---
+
+# 4. Important architectural principle
+
+Do NOT implement a PostgreSQL scheduled job simply to maintain a table-level LSN.
+
+PostgreSQL does not natively maintain an authoritative:
+
+```text
+table → latest committed WAL LSN
+```
+
+mapping.
+
+Instead, leverage the information already present in the logical decoding stream.
+
+The recovery analyzer should inspect the old slot using a non-consuming operation such as:
+
+```sql
+pg_logical_slot_peek_changes(...)
+```
+
+with the existing wal2json configuration.
+
+The objective is to derive:
+
+```text
+affected_table_set
+```
+
+from the unconsumed logical decoding stream.
+
+The old slot must NOT be advanced merely to discover affected tables.
+
+---
+
+# 5. WP2 — Independent Recovery Source
+
+Implement an independent recovery-analysis component.
+
+Its responsibility is:
+
+```text
+old replication slot
+        ↓
+PEEK logical changes
+        ↓
+parse wal2json
+        ↓
+transaction-aware analysis
+        ↓
+affected tables
+        ↓
+recovery boundary / metadata
+        ↓
+durable recovery manifest
+```
+
+This component must be logically independent from the normal Delta-processing state.
+
+It must not simply say:
+
+```text
+table is affected because table_latest_seen_lsn says so
+```
+
+The source of truth for determining affected tables during this recovery analysis should be the logical decoding/WAL stream itself.
+
+The persisted recovery manifest should contain enough information to audit exactly how the affected-table set was determined.
+
+At minimum capture concepts equivalent to:
+
+```text
+recovery_id
+old_slot_name
+old_slot_generation
+scan_start_lsn
+scan_end_lsn / analysis_boundary
+affected_table
+highest_observed_commit_lsn_for_table
+recovery_status
+created_at
+updated_at
+```
+
+Adapt names to the existing project conventions.
+
+---
+
+# 6. Transaction-aware WAL scanning
+
+The recovery analyzer must understand transaction boundaries.
+
+For example:
+
+```text
+BEGIN
+UPDATE table_A
+UPDATE table_B
+UPDATE table_A
+COMMIT
+```
+
+must result in:
+
+```text
+affected tables:
+A
+B
+```
+
+and the transaction's COMMIT LSN must be associated with both affected tables.
+
+Do not incorrectly treat individual row/change LSNs as the transaction watermark.
+
+Handle:
+
+* INSERT
+* UPDATE
+* DELETE
+* multiple changes to the same table
+* multiple tables in one transaction
+* multiple transactions
+* repeated changes to the same table
+* transactions containing many changes
+* empty ranges
+* commit ordering
+* wal2json BEGIN/COMMIT records
+* schema-qualified table names
+* quoted identifiers where applicable
+
+Deduplicate the affected-table set.
+
+---
+
+# 7. Recovery scan must not consume WAL
+
+The analysis operation must use a peek/non-consuming mechanism.
+
+The following must remain true:
+
+```text
+Before analysis:
+confirmed_flush_lsn = X
+
+After analysis:
+confirmed_flush_lsn = X
+```
+
+unless a completely separate, explicitly documented operation intentionally advances the slot.
+
+Add a test proving that affected-table analysis does not advance the slot.
+
+---
+
+# 8. Recovery boundary — MOST IMPORTANT PART
+
+Do not implement selective recovery until you have carefully designed and documented the recovery boundary.
+
+The biggest correctness risk is:
+
+```text
+identify affected tables
+        ↓
+full load table
+        ↓
+new PostgreSQL changes happen
+        ↓
+new CDC starts
+```
+
+which can result in:
+
+* lost changes
+* duplicate changes
+* stale full-load state
+* inconsistent table state
+
+You must establish a precise ordering between:
+
+1. old-slot WAL analysis
+2. new CDC generation / slot
+3. snapshot/full-load
+4. CDC resume
+
+The design must guarantee that changes cannot silently fall between the full-load boundary and the new CDC boundary.
+
+---
+
+# 9. Do not assume the proposed sequence is safe
+
+Before implementation, explicitly analyze at least these possible sequences:
+
+### Sequence A
+
+```text
+Analyze old WAL
+↓
+Create new slot
+↓
+Full load affected table
+↓
+Start new CDC
+```
+
+### Sequence B
+
+```text
+Create new slot
+↓
+Analyze old WAL
+↓
+Full load
+↓
+Start CDC
+```
+
+### Sequence C
+
+```text
+Establish consistent snapshot
+↓
+Create/retain appropriate CDC boundary
+↓
+Full load
+↓
+Start CDC
+```
+
+Determine which ordering is actually safe under PostgreSQL logical replication semantics.
+
+If the exact PostgreSQL semantics differ from assumptions, use PostgreSQL documentation and controlled disposable-slot experiments to establish the correct behavior.
+
+Do not claim correctness based only on intuition.
+
+---
+
+# 10. Snapshot consistency requirement
+
+Selective full loads must have a defined consistency relationship with the new CDC boundary.
+
+The implementation must answer:
+
+> At what exact PostgreSQL state is the full-loaded table represented?
+
+and:
+
+> From what exact LSN does the new CDC generation capture changes?
+
+The desired conceptual relationship is:
+
+```text
+PostgreSQL state at recovery boundary
+             │
+             ├── full-load affected tables
+             │
+             └── CDC captures changes after boundary
+```
+
+No change should be lost between those two mechanisms.
+
+Document the exact mechanism used to guarantee this.
+
+---
+
+# 11. New CDC generation / slot rollover
+
+Use the Phase 2 slot-generation infrastructure.
+
+Do not simply:
+
+```text
+DROP OLD SLOT
+CREATE NEW SLOT
+```
+
+without a safe transition.
+
+The intended lifecycle should be conceptually:
+
+```text
+OLD_GENERATION_ACTIVE
+        ↓
+RECOVERY_ANALYSIS
+        ↓
+AFFECTED_TABLES_IDENTIFIED
+        ↓
+NEW_GENERATION_CREATED
+        ↓
+RECOVERY_SNAPSHOT_ESTABLISHED
+        ↓
+SELECTIVE_RELOAD
+        ↓
+NEW_GENERATION_VALIDATED
+        ↓
+CDC_RESUMING
+        ↓
+OLD_GENERATION_RETIREMENT
+        ↓
+NORMAL
+```
+
+The old slot should only be discarded when the system has established that the new recovery generation is safe.
+
+Reuse the existing generation/identity tracking rather than creating a parallel incompatible mechanism.
+
+---
+
+# 12. Recovery manifest
+
+Implement a durable recovery manifest.
+
+It should allow the system to answer:
+
+```text
+Why did recovery start?
+Which old slot/generation was involved?
+What LSN range was analyzed?
+Which tables were identified?
+Why were those tables selected?
+What recovery boundary was used?
+Which tables have completed full load?
+Which tables remain pending?
+Which new slot/generation was created?
+Has CDC resumed?
+Is the old slot safe to drop?
+```
+
+Suggested conceptual structure:
+
+```text
+recovery_manifest
+-------------------------
+recovery_id
+old_slot
+old_generation
+new_slot
+new_generation
+scan_start_lsn
+scan_end_lsn
+recovery_boundary_lsn
+affected_table
+table_max_commit_lsn
+reload_status
+cdc_validation_status
+recovery_status
+reason
+created_at
+updated_at
+```
+
+Adapt this to existing tables and naming conventions.
+
+Do not duplicate existing state unnecessarily.
+
+---
+
+# 13. Selective full-load semantics
+
+Only affected tables should be full-loaded.
+
+Example:
+
+```text
+Affected:
+A C F
+
+Reload:
+A C F
+
+Do not reload:
+B D E
+```
+
+However, the implementation must have a safe fallback:
+
+```text
+If affected-table analysis is incomplete,
+ambiguous,
+corrupt,
+or cannot establish a safe boundary,
+
+DO NOT perform selective recovery.
+
+Fall back to:
+FULL_RELOAD_REQUIRED
+```
+
+Correctness is more important than reducing reload volume.
+
+---
+
+# 14. Failure-safe behavior
+
+Any uncertainty must fail closed.
+
+Examples:
+
+### WAL analysis incomplete
+
+```text
+RECOVERY_ANALYSIS_FAILED
+        ↓
+FULL_RELOAD_REQUIRED
+```
+
+### Cannot establish safe snapshot boundary
+
+```text
+SELECTIVE_RECOVERY_UNSAFE
+        ↓
+FULL_RELOAD_REQUIRED
+```
+
+### New slot cannot be validated
+
+```text
+NEW_GENERATION_INVALID
+        ↓
+RECOVERY_REQUIRED
+```
+
+### Recovery manifest corrupt
+
+```text
+CORRUPT_STATE
+        ↓
+FAILED / operator recovery
+```
+
+Never silently continue CDC after an uncertain recovery boundary.
+
+---
+
+# 15. WAL pressure handling
+
+Extend the existing monitoring/observability layer to recognize a WAL-pressure recovery scenario.
+
+Use the PostgreSQL slot metadata already monitored in Phase 2, such as:
+
+```text
+restart_lsn
+confirmed_flush_lsn
+wal_status
+safe_wal_size
+```
+
+Do not hard-code arbitrary thresholds without documenting them.
+
+If the project already has configured warning/critical thresholds, reuse them.
+
+Otherwise introduce configurable thresholds.
+
+Conceptually:
+
+```text
+NORMAL
+  ↓
+WARNING
+  ↓
+CRITICAL
+  ↓
+RECOVERY_REQUIRED
+```
+
+The goal is to start recovery analysis **before WAL becomes irrecoverably unavailable**, where operationally possible.
+
+---
+
+# 16. Existing WAL-gap behavior must remain
+
+If the system discovers:
+
+```text
+app_confirmed_lsn < restart_lsn
+```
+
+then the old WAL is already unavailable.
+
+Do not attempt to pretend that the old WAL can still be inspected.
+
+The state must remain:
+
+```text
+WAL_GAP_DETECTED
+        ↓
+RECOVERY_REQUIRED
+```
+
+At that point selective WAL-based affected-table discovery is no longer possible from the missing WAL.
+
+Use the safest available recovery path.
+
+If the implementation cannot independently determine affected tables after the gap, retain:
+
+```text
+FULL_RELOAD_ALL_ACTIVE_TABLES
+```
+
+as the fallback.
+
+---
+
+# 17. Important distinction: latest_seen_lsn vs last_processed_lsn
+
+If table-level state already exists or is introduced, preserve this semantic distinction:
+
+```text
+latest_seen_lsn
+```
+
+means:
+
+> highest relevant transaction commit LSN observed by the CDC/recovery reader for that table.
+
+Whereas:
+
+```text
+last_processed_lsn
+```
+
+means:
+
+> highest relevant transaction commit LSN whose changes have been durably applied to Delta.
+
+Do not claim these are equivalent.
+
+A table can have:
+
+```text
+latest_seen_lsn > last_processed_lsn
+```
+
+during processing or failure.
+
+Do not use `latest_seen_lsn` as proof that Delta is synchronized.
+
+---
+
+# 18. Recommended recovery state machine
+
+Extend the existing state machine rather than replacing it.
+
+A conceptual model is:
+
+```text
+NORMAL
+   │
+   ├── WAL pressure
+   ▼
+WAL_PRESSURE
+   │
+   ▼
+RECOVERY_ANALYSIS
+   │
+   ├── analysis failure
+   │       ↓
+   │   FULL_RELOAD_REQUIRED
+   │
+   ▼
+AFFECTED_TABLES_IDENTIFIED
+   │
+   ▼
+RECOVERY_BOUNDARY_ESTABLISHED
+   │
+   ├── unsafe
+   │     ↓
+   │ FULL_RELOAD_REQUIRED
+   │
+   ▼
+NEW_GENERATION_CREATED
+   │
+   ▼
+SELECTIVE_RELOAD
+   │
+   ▼
+NEW_CDC_VALIDATION
+   │
+   ├── failure → RECOVERY_REQUIRED
+   │
+   ▼
+OLD_GENERATION_RETIREMENT
+   │
+   ▼
+NORMAL
+```
+
+Do not add states that duplicate existing Phase 2 states without justification.
+
+Use existing naming conventions where possible.
+
+---
+
+# 19. Idempotency requirements
+
+Every recovery step must be restartable.
+
+Examples:
+
+```text
+Recovery analysis completed
+↓
+process crashes
+```
+
+Restart must not blindly rescan/recreate everything.
+
+Likewise:
+
+```text
+A full loaded
+C full loading
+process crashes
+```
+
+must resume safely.
+
+And:
+
+```text
+new slot created
+process crashes
+```
+
+must not result in an uncontrolled second slot/generation.
+
+Use the durable recovery manifest/state to determine what has already happened.
+
+---
+
+# 20. Crash scenarios to support
+
+Implement and test at least:
+
+### Crash 1
+
+```text
+Before WAL analysis
+```
+
+### Crash 2
+
+```text
+During WAL analysis
+```
+
+### Crash 3
+
+```text
+After affected-table manifest persisted
+Before new slot creation
+```
+
+### Crash 4
+
+```text
+After new slot creation
+Before selective reload
+```
+
+### Crash 5
+
+```text
+During table A reload
+```
+
+### Crash 6
+
+```text
+After A reload
+Before C reload
+```
+
+### Crash 7
+
+```text
+After all reloads
+Before new CDC validation
+```
+
+### Crash 8
+
+```text
+After new CDC starts
+Before old slot is retired
+```
+
+The system must recover deterministically from each state.
+
+---
+
+# 21. Mandatory concurrency tests
+
+These are critical.
+
+Create controlled tests where PostgreSQL receives changes while recovery is occurring.
+
+At minimum test:
+
+### Test A
+
+```text
+Affected-table analysis
+        ↓
+UPDATE affected_table
+        ↓
+full load
+        ↓
+new CDC
+```
+
+### Test B
+
+```text
+new slot/boundary establishment
+        ↓
+UPDATE affected_table
+        ↓
+full load
+        ↓
+CDC
+```
+
+### Test C
+
+```text
+full load starts
+        ↓
+UPDATE affected_table
+        ↓
+full load completes
+        ↓
+CDC
+```
+
+### Test D
+
+A transaction changes multiple tables while recovery is running.
+
+The tests must determine whether the chosen recovery ordering guarantees:
+
+```text
+No lost changes
+No permanently stale rows
+No unrecoverable duplicate application
+```
+
+If the answer is no, redesign the boundary mechanism.
+
+---
+
+# 22. Mandatory WAL-analysis tests
+
+Use disposable PostgreSQL logical replication slots.
+
+Test:
+
+### Single transaction
+
+```text
+BEGIN
+UPDATE A
+COMMIT
+```
+
+Expected:
+
+```text
+A
+```
+
+### Multiple tables
+
+```text
+BEGIN
+UPDATE A
+UPDATE B
+UPDATE C
+COMMIT
+```
+
+Expected:
+
+```text
+A B C
+```
+
+### Multiple transactions
+
+```text
+T1 → A
+T2 → B
+T3 → A,C
+T4 → F
+```
+
+Expected:
+
+```text
+A B C F
+```
+
+### Repeated table changes
+
+```text
+T1 → A
+T2 → A
+T3 → A
+```
+
+Expected:
+
+```text
+A
+```
+
+### CRUD
+
+Verify:
+
+```text
+INSERT
+UPDATE
+DELETE
+```
+
+all mark the table affected.
+
+### No changes
+
+Expected:
+
+```text
+empty affected-table set
+```
+
+### Large transaction
+
+Verify the scanner correctly handles large transactions and the previously observed wal2json behavior around `upto_nchanges`.
+
+Do not assume `upto_nchanges` truncates transactions; preserve the experimentally established behavior.
+
+---
+
+# 23. LSN tests
+
+Retain the existing understanding that:
+
+```text
+B
+U
+U
+C
+```
+
+represents a transaction whose authoritative transaction watermark is the COMMIT LSN.
+
+Test:
+
+* commit LSN extraction
+* multiple transactions
+* transaction ordering
+* LSN parsing/comparison
+* restart_lsn
+* confirmed_flush_lsn
+* application confirmed LSN
+* recovery boundary LSN
+
+Do not compare LSNs using ordinary string comparison.
+
+Use a correct PostgreSQL LSN representation/comparator.
+
+---
+
+# 24. Slot rollover tests
+
+Using disposable slots, test:
+
+```text
+generation 1
+    ↓
+recovery
+    ↓
+generation 2
+```
+
+Verify:
+
+* generation identity is unique;
+* old and new slots cannot be confused;
+* state references the correct generation;
+* restart after new-slot creation is safe;
+* old slot is not dropped prematurely;
+* old slot can eventually be retired;
+* new CDC resumes from the correct boundary.
+
+---
+
+# 25. Data correctness tests
+
+For every selective recovery test, compare PostgreSQL and Delta after recovery.
+
+At minimum verify:
+
+```text
+row count
+primary keys
+inserted rows
+updated rows
+deleted rows
+updated values
+```
+
+For representative tables also perform checksums/hashes where practical.
+
+The final expected property is:
+
+```text
+PostgreSQL state
+        ==
+Databricks state
+```
+
+for the recovered tables and for CDC changes after the recovery boundary.
+
+---
+
+# 26. Do not hide unsafe assumptions
+
+If PostgreSQL logical replication semantics prevent a fully safe implementation using the initially proposed mechanism, stop and document that.
+
+Do NOT:
+
+* silently weaken guarantees;
+* invent PostgreSQL behavior;
+* assume slot creation automatically provides a snapshot boundary without testing;
+* assume a full table load is automatically consistent with a new logical replication slot;
+* assume table-level affected status alone is enough to recover data;
+* drop the old slot merely to make a test pass.
+
+The implementation must be based on verified PostgreSQL behavior.
+
+---
+
+# 27. Production safety
+
+The following must never happen accidentally:
+
+```text
+DROP production replication slot
+```
+
+or:
+
+```text
+ADVANCE production slot
+```
+
+during development/testing.
+
+Use explicit configuration such as:
+
+```text
+ENVIRONMENT=DEV
+ALLOW_SLOT_MUTATION=false
+```
+
+or the repository's existing safety mechanism.
+
+Any destructive operation should require an explicit safety gate.
+
+---
+
+# 28. Deliverables
+
+At the end of Phase 3 provide:
+
+## A. Implementation
+
+All required production code changes.
+
+## B. Database changes
+
+Only if required.
+
+Provide:
+
+* schema changes
+* migration scripts
+* rollback considerations
+
+Do not alter production automatically.
+
+## C. Tests
+
+Provide automated tests and disposable PostgreSQL integration tests where possible.
+
+## D. Architecture document
+
+Create/update a detailed Phase 3 design document covering:
+
+```text
+1. Problem
+2. Existing Phase 2 architecture
+3. Phase 3 architecture
+4. WP1 Selective Recovery
+5. WP2 Independent Recovery Source
+6. WAL analysis
+7. Affected-table detection
+8. Recovery boundary
+9. Snapshot semantics
+10. Slot/generation rollover
+11. Recovery state machine
+12. Failure handling
+13. Crash recovery
+14. Concurrency handling
+15. Data correctness
+16. Observability
+17. Operational procedure
+18. Rollback/fallback
+19. Known limitations
+20. Test results
+```
+
+## E. Operational runbook
+
+Document exactly what happens when:
+
+```text
+WAL WARNING
+WAL CRITICAL
+RECOVERY_REQUIRED
+WAL_GAP_DETECTED
+SELECTIVE_RECOVERY
+FULL_RELOAD_REQUIRED
+```
+
+---
+
+# 29. Final Phase 3 acceptance criteria
+
+Do not declare Phase 3 complete unless all applicable criteria below are satisfied.
+
+### Functional
+
+* [ ] WAL backlog can be inspected without advancing the old slot.
+* [ ] Affected tables can be derived from wal2json changes.
+* [ ] Transactions are parsed correctly.
+* [ ] Multiple-table transactions work.
+* [ ] Repeated table changes are deduplicated.
+* [ ] CRUD operations are handled.
+* [ ] Recovery manifest is durable.
+* [ ] Selective full-load is implemented.
+* [ ] CDC generation rollover is implemented.
+* [ ] Old generation retirement is controlled.
+* [ ] Existing Phase 2 recovery states remain functional.
+
+### Safety
+
+* [ ] No WAL is consumed during analysis.
+* [ ] COMMIT-LSN watermark invariant remains intact.
+* [ ] No unsafe recovery proceeds silently.
+* [ ] Uncertain recovery falls back to full reload.
+* [ ] Production slot cannot accidentally be modified during tests.
+* [ ] Old slot is not dropped prematurely.
+
+### Correctness
+
+* [ ] No lost changes across recovery boundary.
+* [ ] No permanently stale recovered rows.
+* [ ] Concurrent changes are handled.
+* [ ] Multi-table transactions are handled.
+* [ ] New CDC generation starts at the correct boundary.
+* [ ] PostgreSQL and Delta converge after recovery.
+
+### Resilience
+
+* [ ] Recovery is restartable.
+* [ ] Crash during analysis is safe.
+* [ ] Crash during reload is safe.
+* [ ] Crash after new slot creation is safe.
+* [ ] Crash before old slot retirement is safe.
+* [ ] Duplicate generation creation is prevented.
+
+### Evidence
+
+* [ ] Automated tests pass.
+* [ ] Disposable PostgreSQL integration experiments pass.
+* [ ] Concurrency tests pass.
+* [ ] Slot rollover tests pass.
+* [ ] Documentation explains the verified PostgreSQL semantics.
+* [ ] Known limitations are explicitly documented.
+
+---
+
+# 30. Required final report
+
+When finished, provide a Phase 3 implementation report with:
+
+```text
+Phase 3 Status
+==============
+
+WP1 — Selective Recovery:
+IMPLEMENTED / PARTIAL / NOT SAFE
+
+WP2 — Independent Recovery Source:
+IMPLEMENTED / PARTIAL / NOT SAFE
+
+Slot Generation Rollover:
+IMPLEMENTED / PARTIAL
+
+Recovery Boundary:
+VERIFIED / NOT VERIFIED
+
+Concurrent Change Safety:
+PASS / FAIL
+
+Crash Recovery:
+PASS / FAIL
+
+Production Readiness:
+READY / NOT READY
+```
+
+Then provide:
+
+### 1. Files changed
+
+List every changed file and why.
+
+### 2. Database objects changed
+
+List every table/function/procedure/configuration changed.
+
+### 3. Tests executed
+
+For every test:
+
+```text
+Test
+Expected
+Actual
+Result
+```
+
+### 4. PostgreSQL behavior experimentally verified
+
+Clearly separate:
+
+```text
+Observed experimentally
+```
+
+from:
+
+```text
+Assumed/documented
+```
+
+### 5. Remaining limitations
+
+Do not hide any unresolved race conditions or correctness concerns.
+
+### 6. Recovery flow
+
+Provide a final sequence diagram/ASCII architecture showing:
+
+```text
+WAL PRESSURE
+     ↓
+RECOVERY ANALYSIS
+     ↓
+PEEK OLD SLOT
+     ↓
+AFFECTED TABLES
+     ↓
+RECOVERY BOUNDARY
+     ↓
+NEW GENERATION
+     ↓
+SELECTIVE FULL LOAD
+     ↓
+CDC VALIDATION
+     ↓
+OLD SLOT RETIREMENT
+     ↓
+NORMAL
+```
+
+---
+
+# 31. Implementation discipline
+
+Before modifying code:
+
+1. Inspect the complete repository.
+2. Locate the current CDC implementation.
+3. Locate `Postgre_DataIngestion_V4.py` or its current successor.
+4. Locate checkpoint/state schemas.
+5. Locate slot-generation code.
+6. Locate recovery state-machine implementation.
+7. Locate monitoring/observability implementation.
+8. Locate all existing tests.
+9. Understand current database schemas and naming.
+10. Produce a short implementation plan mapped to the actual code.
+
+Then implement incrementally.
+
+Do not overwrite working Phase 2 functionality.
+
+Do not introduce unnecessary dependencies.
+
+Do not create a second competing recovery state machine.
+
+Do not create a second competing checkpoint mechanism.
+
+Reuse existing abstractions wherever possible.
+
+---
+
+# 32. Most important instruction
+
+**Correctness takes priority over selective-reload optimization.**
+
+The desired end state is:
+
+```text
+Normal operation:
+    WAL → CDC → Delta
+
+WAL pressure:
+    inspect WAL → identify affected tables
+    → establish safe boundary
+    → reload affected tables
+    → new CDC generation
+    → resume
+
+If selective recovery cannot be proven safe:
+    → full reload all active tables
+```
+
+A working full-reload fallback is preferable to an unsafe selective-recovery implementation.
+
+Do not declare success merely because the code runs.
+
+The Phase 3 implementation must demonstrate, through controlled experiments, that the chosen recovery-boundary mechanism does not lose PostgreSQL changes during concurrent activity.
+
+Start by inspecting the existing Phase 2 implementation and produce the code-specific implementation plan before making modifications.
